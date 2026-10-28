@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title description">
+  <title id="title">LDoN Triune Runner</title>
+  <desc id="description">Original abstract banner artwork with a dungeon doorway, route lines, and the project title.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111a2b"/>
+      <stop offset="1" stop-color="#263b54"/>
+    </linearGradient>
+    <linearGradient id="portal" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#d28b43"/>
+      <stop offset="1" stop-color="#ffe4a6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="360" rx="26" fill="url(#background)"/>
+  <path d="M0 292 160 214l120 50 177-109 149 79 170-115 188 104 119-68 117 58v147H0z" fill="#17283c" opacity=".8"/>
+  <g fill="none" stroke="#718aa2" stroke-width="2" opacity=".6">
+    <path d="M30 303h180l62-41h125l58-36h141"/>
+    <path d="M860 43v84l-74 47v75h-89"/>
+    <path d="M922 290h124l52-43h76"/>
+  </g>
+  <g transform="translate(85 53)">
+    <path d="M35 220V96a95 95 0 0 1 190 0v124h-37V96a58 58 0 0 0-116 0v124z" fill="#304b64" stroke="#9bb1c4" stroke-width="5"/>
+    <path d="M91 220v-83a39 39 0 0 1 78 0v83z" fill="url(#portal)" opacity=".92"/>
+    <path d="M130 39v-25m-56 49-18-18m130 18 18-18" stroke="#ffe4a6" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="130" cy="12" r="5" fill="#ffe4a6"/>
+  </g>
+  <g fill="#f3f0e7" font-family="Segoe UI, Arial, sans-serif">
+    <text x="390" y="146" font-size="54" font-weight="700" letter-spacing="2">LDoN TRIUNE</text>
+    <text x="394" y="198" font-size="25" letter-spacing="4" fill="#d0dfeb">AUTOMATION RUNNER</text>
+    <text x="394" y="250" font-size="18" fill="#d9aa67">MacroQuest Lua  ·  Triune AutoCombat  ·  v1.3.2</text>
+  </g>
+  <path d="M394 216h570" stroke="#d28b43" stroke-width="3"/>
+</svg>
