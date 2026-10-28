@@ -52,6 +52,18 @@ The TAR.GZ package is provided for users who prefer Linux archive tools. It
 does not imply native Linux support: EverQuest and MacroQuest runtime
 compatibility on Linux (including Wine setups) has not been tested or verified.
 
+## Credits and attributions
+
+- **Cyfer** — LDoN mission and travel reference details adapted from the
+  user-provided `LDON.lua`. The original reference material is not included in
+  this repository.
+- **DeFluxStudios** — MacroQuest Lua runner implementation, including the
+  campaign scheduler, Triune AutoCombat integration, configuration UI, and
+  navigation recovery behavior.
+- **MacroQuest**, **Triune AutoCombat**, **MQ2Nav**, and **MQ2MoveUtils** are
+  separate upstream projects and are required dependencies; they are not
+  included in this repository or release.
+
 ## Project
 
 - Repository: <https://github.com/DeFluxStudios/Stylized-LDON-Automation-LUA-Script>
