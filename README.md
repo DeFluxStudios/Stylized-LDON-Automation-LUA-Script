@@ -52,6 +52,15 @@ The TAR.GZ package is provided for users who prefer Linux archive tools. It
 does not imply native Linux support: EverQuest and MacroQuest runtime
 compatibility on Linux (including Wine setups) has not been tested or verified.
 
+## Artwork and link previews
+
+The `branding` folder contains the original 1280 × 640 social-preview image
+for this repository, matching artwork for the Triune Long Buffs project, and
+the DeFluxStudios profile banner. These images are presentation assets only;
+they are not loaded by the Lua runner. GitHub's hover-card layout is fixed,
+but repository social-preview images customize the artwork shown in rich link
+previews.
+
 ## Credits and attributions
 
 - **Cyfer** — LDoN mission and travel reference details adapted from the
