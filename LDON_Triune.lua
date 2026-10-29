@@ -11,7 +11,7 @@
 local mq = require('mq')
 local ImGui = require('ImGui')
 
-local VERSION = '1.3.2'
+local VERSION = '1.3.3'
 
 -- Hub, zone-line, and dungeon metadata used by the travel state machine.
 local HUBS = {
@@ -319,7 +319,7 @@ local function waitForZoneChange(previousZone, timeoutSeconds)
     return false
 end
 
-local function navToLocation(y, x, z, arrivalDistance)
+local function navToLocation(y, x, z, arrivalDistance, timeoutSeconds)
     local startY = tonumber(mq.TLO.Me.Y()) or 0
     local startX = tonumber(mq.TLO.Me.X()) or 0
     local startZ = tonumber(mq.TLO.Me.Z()) or 0
@@ -340,7 +340,7 @@ local function navToLocation(y, x, z, arrivalDistance)
     else
         mq.cmdf('/nav locyx %.2f %.2f', y, x)
     end
-    if not waitForNavigation(150, reachedLocation) then return false end
+    if not waitForNavigation(timeoutSeconds or 150, reachedLocation) then return false end
     if not reachedLocation() then
         local endY = tonumber(mq.TLO.Me.Y()) or startY
         local endX = tonumber(mq.TLO.Me.X()) or startX
@@ -1076,6 +1076,7 @@ breakInvisibilityForInteraction = function(destination)
 end
 
 local function useMagus(destination, magusName)
+    local interactionRange = 10
     local startZone = zoneId()
     local magus = mq.TLO.Spawn('npc ' .. (magusName or MAGUS_NAMES_BY_ZONE[startZone] or 'Magus'))
     local magusId = tonumber(magus.ID()) or 0
@@ -1088,14 +1089,33 @@ local function useMagus(destination, magusName)
         return false
     end
     if not breakInvisibilityForInteraction('the Magus') then return false end
-    if (tonumber(mq.TLO.Spawn(magusId).Distance3D()) or math.huge) > 15 then
-        mq.cmdf('/nav id %d', magusId)
-        if not waitForNavigation(180, function()
-            return (tonumber(mq.TLO.Spawn(magusId).Distance3D()) or math.huge) <= 15
-        end) then return false end
+    local magusSpawn = mq.TLO.Spawn(magusId)
+    if (tonumber(magusSpawn.Distance3D()) or math.huge) > interactionRange then
+        local magusY = tonumber(magusSpawn.Y())
+        local magusX = tonumber(magusSpawn.X())
+        local currentY = tonumber(mq.TLO.Me.Y())
+        local currentX = tonumber(mq.TLO.Me.X())
+        if not magusY or not magusX or not currentY or not currentX then
+            echo('Could not determine a reachable approach point for the Magus.')
+            return false
+        end
+
+        local offsetY = currentY - magusY
+        local offsetX = currentX - magusX
+        local planarDistance = math.sqrt(offsetY ^ 2 + offsetX ^ 2)
+        if planarDistance < 0.01 then
+            offsetY = 1
+            planarDistance = 1
+        end
+        local approachY = magusY + offsetY / planarDistance * 6
+        local approachX = magusX + offsetX / planarDistance * 6
+        if not navToLocation(approachY, approachX, nil, 2) then
+            echo('Could not navigate to a close interaction point at the Magus.')
+            return false
+        end
     end
-    local magusDistance = tonumber(mq.TLO.Spawn(magusId).Distance3D()) or math.huge
-    if magusDistance > 15 then
+    local magusDistance = tonumber(magusSpawn.Distance3D()) or math.huge
+    if magusDistance > interactionRange then
         echo(string.format('Navigation stopped %.0f units from the Magus; not attempting dialogue.', magusDistance))
         return false
     end
@@ -1180,19 +1200,35 @@ local function clickSwitch(switchId)
             offsetY = 1
             planarDistance = 1
         end
-        local approachY = doorY + offsetY / planarDistance * 5
-        local approachX = doorX + offsetX / planarDistance * 5
-        if not navToLocation(approachY, approachX, nil, 6) then
-            echo('Could not navigate within click range of the LDoN entrance switch.')
+        local directionY = offsetY / planarDistance
+        local directionX = offsetX / planarDistance
+        local approachAngles = { 0, 45, -45, 90, -90, 135, -135, 180 }
+        local reachedClickRange = false
+        for _, angle in ipairs(approachAngles) do
+            local radians = math.rad(angle)
+            local cosine = math.cos(radians)
+            local sine = math.sin(radians)
+            local approachY = doorY + (directionY * cosine - directionX * sine) * 10
+            local approachX = doorX + (directionY * sine + directionX * cosine) * 10
+            mq.cmd('/nav stop')
+            if navToLocation(approachY, approachX, nil, 2, 30) then
+                mq.cmdf('/doortarget id %d', doorId)
+                mq.delay(250)
+                local targetedId = tonumber(mq.TLO.DoorTarget.ID()) or 0
+                distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
+                if targetedId ~= 0 and targetedId == doorId and distance <= 15 then
+                    reachedClickRange = true
+                    break
+                end
+            end
+        end
+        if not reachedClickRange then
+            echo('Could not navigate to a reachable point within click range of the LDoN entrance switch.')
             return false
         end
 
-        if switchId and switchId > 0 then
-            mq.cmdf('/doortarget id %d', switchId)
-            mq.delay(250)
-        end
         local targetedId = tonumber(mq.TLO.DoorTarget.ID()) or 0
-        if targetedId == 0 or (switchId and switchId > 0 and targetedId ~= switchId) then
+        if targetedId == 0 or targetedId ~= doorId then
             echo('The LDoN entrance switch was no longer targeted after moving.')
             return false
         end

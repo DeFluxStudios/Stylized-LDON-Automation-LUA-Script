@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to the LDoN Triune Runner are documented here. The script
-currently reports version **1.3.2**.
+currently reports version **1.3.3**.
 
 ## Version history note
 
@@ -10,6 +10,13 @@ release records. The entries before v1.3.2 below are therefore a retrospective
 feature ledger reconstructed from the current script and the available project
 history; they are not claims that matching releases or tags were previously
 published. The initial public package is v1.3.2.
+
+## [1.3.3] - 2026-10-29
+
+- Try nearby approach points around an LDoN entrance switch when the nearest
+  navmesh approach is unreachable; confirm interaction range before clicking.
+- Approach Magus NPCs closely before speaking to ensure their travel dialogue
+  is within interaction range.
 
 ## [1.3.2] - 2026-10-28
 
