@@ -30,6 +30,8 @@ Version history is in [CHANGELOG.md](CHANGELOG.md).
 - MQ2Nav and MQ2MoveUtils loaded, plus the required zone navmeshes
 - Triune AutoCombat
 - BoxNet for automatic remote-box setup
+- Optional: the Long-Duration Buffs and Swarm Pull Triune plugins, enabled from
+  the window's "Options and optional plugins" section (both off by default)
 - The travel abilities/items used by the selected route; solo return requires
   the Bazaar and Back AA (331)
 
@@ -69,6 +71,11 @@ previews.
 - **DeFluxStudios** — MacroQuest Lua runner implementation, including the
   campaign scheduler, Triune AutoCombat integration, configuration UI, and
   navigation recovery behavior.
+- **Triune** — author of the Long-Duration Buffs plugin
+  (`long_buffs.lua`, `tac_long_buffs_store.lua`) that the runner can optionally
+  enable. **matth** — author of the Swarm Pull plugin the runner can optionally
+  start. **RedGuides** — author of MQ2AdvPath, optionally used for recorded
+  routes. Neither plugin is included in this repository or release.
 - **MacroQuest**, **Triune AutoCombat**, **MQ2Nav**, and **MQ2MoveUtils** are
   separate upstream projects and are required dependencies; they are not
   included in this repository or release.

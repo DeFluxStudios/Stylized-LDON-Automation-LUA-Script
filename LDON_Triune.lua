@@ -7,11 +7,19 @@
 -- mission-request flow, and dungeon entrance/exit routing were reorganized for
 -- MacroQuest Lua. The campaign scheduler, Triune integration, UI, and recovery
 -- behavior are additions to this runner.
+--
+-- Optional Triune plugin integrations (each is off unless enabled in the window):
+--   * Long-Duration Buffs (lua/tac/long_buffs.lua, tac_long_buffs_store.lua)
+--     by Triune. The runner only sends /ac longbuff on and reads the roster file.
+--   * Swarm Pull (lua/tac/Swarm_Pull_v2.0.lua) by matth, a Lua port of pull.mac.
+--     The runner only sends /ac swarm start|stop; the plugin does the pulling.
+--   * MQ2AdvPath (RedGuides) for optional recorded-route playback via /play and /record.
+-- Those plugins are separate files and are not bundled with this runner.
 
 local mq = require('mq')
 local ImGui = require('ImGui')
 
-local VERSION = '1.3.3'
+local VERSION = '1.4.4'
 
 -- Hub, zone-line, and dungeon metadata used by the travel state machine.
 local HUBS = {
@@ -184,10 +192,106 @@ local campaignTaskCounted = false
 local campaignTravelPending = false
 local campaignStopPending = false
 local campaignInitialized = false
+local useLongBuffs = false
+local useAdvPath = false
+local advPathFirst = false
+local useSwarmPull = false
+local swarmPullCount = 3
+local swarmPullRadius = 200
+local swarmActive = false
+local retryLimit = 2
+local failureStreak = 0
+local stopAfterMinutes = 0
+local lastFailure = ''
+local preflightResults = {}
+local stats = { startedAt = 0, dungeons = 0, failures = 0, retries = 0, dungeonSeconds = 0, dungeonStartedAt = 0 }
+local stuckProgress = ''
+local stuckSince = 0
+local stuckWarned = false
+local recentLog = {}
+local LOG_LIMIT = 512 * 1024
+local logPath = (tostring(mq.TLO.MacroQuest.Path('logs')() or 'logs')):gsub('\\', '/') .. '/LDON_Triune.log'
+
+local function writeLog(line)
+    recentLog[#recentLog + 1] = line
+    if #recentLog > 60 then table.remove(recentLog, 1) end
+    local file = io.open(logPath, 'a')
+    if not file then return end
+    if file:seek('end') > LOG_LIMIT then
+        file:close()
+        os.remove(logPath .. '.old')
+        os.rename(logPath, logPath .. '.old')
+        file = io.open(logPath, 'a')
+        if not file then return end
+    end
+    file:write(line, '\n')
+    file:close()
+end
 
 -- Shared status output and zone/campaign initialization.
 local function echo(message)
     print('\ag[LDON]\ax ' .. message)
+    writeLog(os.date('%Y-%m-%d %H:%M:%S ') .. message:gsub('\a.', ''))
+end
+
+-- Optional Triune plugin integrations. Both are skipped when their files are missing.
+local function luaFileExists(relativePath)
+    local base = tostring(mq.luaDir or (tostring(mq.TLO.MacroQuest.Path('lua')() or 'lua')))
+    local file = io.open(base:gsub('\\', '/') .. '/' .. relativePath, 'r')
+    if file then file:close() return true end
+    return false
+end
+
+local function longBuffsInstalled()
+    return luaFileExists('tac/long_buffs.lua')
+end
+
+local function swarmPullInstalled()
+    return luaFileExists('tac/swarm_pull.lua') or luaFileExists('tac/Swarm_Pull_v2.0.lua')
+end
+
+local function longBuffRosterCount()
+    local ok, store = pcall(require, 'tac_long_buffs_store')
+    if not ok or type(store) ~= 'table' then return nil end
+    local chunk = loadfile(store.path(mq))
+    if not chunk then return 0 end
+    local loaded, saved = pcall(chunk)
+    if loaded and type(saved) == 'table' and type(saved.roster) == 'table' then return #saved.roster end
+    return 0
+end
+
+local function startLongBuffs()
+    if not useLongBuffs then return end
+    if not longBuffsInstalled() then
+        echo('Long-Duration Buffs is enabled but lua/tac/long_buffs.lua was not found; skipping.')
+        return
+    end
+    mq.cmd('/ac longbuff on')
+    if (tonumber(mq.TLO.Group()) or 0) > 0 then mq.cmd('/ac net group longbuff on') end
+end
+
+local function startSwarmPull()
+    if not useSwarmPull or swarmActive then return end
+    if not swarmPullInstalled() then
+        echo('Swarm Pull is enabled but the plugin file was not found in lua/tac; skipping.')
+        return
+    end
+    mq.cmdf('/ac swarm start %d %d', swarmPullCount, swarmPullRadius)
+    swarmActive = true
+    echo('Swarm Pull started. Turn off "Reset via Bazaar when idle" in its window so it never leaves the dungeon.')
+end
+
+local function stopSwarmPull(resumeCombat)
+    if not swarmActive then return end
+    swarmActive = false
+    mq.cmd('/ac swarm stop')
+    if resumeCombat then mq.cmd('/ac run') end
+end
+
+local function setSwarmPull(enabled)
+    useSwarmPull = enabled
+    if not enabled then stopSwarmPull(true) end
+    echo('Swarm Pull ' .. (enabled and 'enabled; it starts when combat begins inside a dungeon.' or 'disabled.'))
 end
 
 mq.event('LDON_AdventureComplete', '#*#You have successfully completed your adventure#*#', function()
@@ -232,7 +336,7 @@ local function initializeCampaignPlan()
     for index = 1, 5 do
         campaignPlan[index] = {
             hubZone = CAMP_ORDER[index],
-            count = CAMP_ORDER[index] == homeHubZone and 1 or 0,
+            count = CAMP_ORDER[index] == (homeHubZone ~= 0 and homeHubZone or CAMP_ORDER[1]) and 1 or 0,
             missionTypeIndex = 3,
         }
         campaignCompleted[index] = 0
@@ -257,9 +361,124 @@ local function nextCampaignLeg(startIndex)
     return nil
 end
 
+-- Lets the runner start from any zone by defaulting to the first selected camp.
+local function resolveHomeHub()
+    if homeHubZone == 0 then selectHomeHub() end
+    if homeHubZone == 0 then
+        local first = nextCampaignLeg(1)
+        if first then homeHubZone = campaignPlan[first].hubZone end
+    end
+    return homeHubZone ~= 0
+end
+
+local ASSIGNMENT_CAMP_KEYWORDS = {
+    { 'deepest guk', 393 }, { 'takish', 392 }, { 'rujarkian', 408 },
+    { 'mistmoore', 68 }, { 'miragul', 30 },
+}
+
+local function hubFromAssignment(dialogue)
+    local text = tostring(dialogue or ''):lower()
+    for _, entry in ipairs(ASSIGNMENT_CAMP_KEYWORDS) do
+        if text:find(entry[1], 1, true) then return entry[2] end
+    end
+    return nil
+end
+
 local function campaignMissionType()
     local leg = campaignLeg()
     return leg and leg.missionTypeIndex or missionTypeIndex
+end
+
+-- Saved per-character settings and failure handling.
+local settingsPath = tostring(mq.configDir or 'config'):gsub('\\', '/') ..
+    '/ldon_triune__' .. tostring(mq.TLO.Me.CleanName() or 'unknown') .. '.lua'
+
+local function saveSettings()
+    local lines = {
+        'return {',
+        string.format('    mainAssistName = %q,', mainAssistName),
+        string.format('    autoStandInCombat = %s,', tostring(autoStandInCombat)),
+        string.format('    campaignLoop = %s,', tostring(campaignLoop)),
+        string.format('    useLongBuffs = %s,', tostring(useLongBuffs)),
+        string.format('    useAdvPath = %s,', tostring(useAdvPath)),
+        string.format('    advPathFirst = %s,', tostring(advPathFirst)),
+        string.format('    useSwarmPull = %s,', tostring(useSwarmPull)),
+        string.format('    hardMode = %s,', tostring(hardMode)),
+        string.format('    swarmPullCount = %d,', swarmPullCount),
+        string.format('    swarmPullRadius = %d,', swarmPullRadius),
+        string.format('    retryLimit = %d,', retryLimit),
+        '    legs = {',
+    }
+    for _, leg in ipairs(campaignPlan) do
+        lines[#lines + 1] = string.format('        [%d] = { count = %d, missionTypeIndex = %d },',
+            leg.hubZone, leg.count or 0, leg.missionTypeIndex or 3)
+    end
+    lines[#lines + 1] = '    },'
+    lines[#lines + 1] = '}'
+    local file = io.open(settingsPath, 'w')
+    if not file then return false end
+    file:write(table.concat(lines, '\n'), '\n')
+    file:close()
+    return true
+end
+
+local function loadSettings()
+    local chunk = loadfile(settingsPath)
+    if not chunk then return end
+    local ok, saved = pcall(chunk)
+    if not ok or type(saved) ~= 'table' then return end
+    local function number(value, low, high, default)
+        value = tonumber(value)
+        if not value then return default end
+        return math.max(low, math.min(high, math.floor(value)))
+    end
+    if type(saved.mainAssistName) == 'string' and saved.mainAssistName ~= '' then
+        mainAssistName = saved.mainAssistName
+    end
+    if type(saved.autoStandInCombat) == 'boolean' then autoStandInCombat = saved.autoStandInCombat end
+    if type(saved.campaignLoop) == 'boolean' then campaignLoop = saved.campaignLoop end
+    if type(saved.useLongBuffs) == 'boolean' then useLongBuffs = saved.useLongBuffs end
+    if type(saved.useAdvPath) == 'boolean' then useAdvPath = saved.useAdvPath end
+    if type(saved.advPathFirst) == 'boolean' then advPathFirst = saved.advPathFirst end
+    if type(saved.useSwarmPull) == 'boolean' then useSwarmPull = saved.useSwarmPull end
+    if type(saved.hardMode) == 'boolean' then hardMode = saved.hardMode end
+    swarmPullCount = number(saved.swarmPullCount, 1, 20, swarmPullCount)
+    swarmPullRadius = number(saved.swarmPullRadius, 20, 1000, swarmPullRadius)
+    retryLimit = number(saved.retryLimit, 0, 5, retryLimit)
+    if type(saved.legs) == 'table' then
+        for _, leg in ipairs(campaignPlan) do
+            local savedLeg = saved.legs[leg.hubZone]
+            if type(savedLeg) == 'table' then
+                leg.count = number(savedLeg.count, 0, 10, leg.count)
+                leg.missionTypeIndex = number(savedLeg.missionTypeIndex, 1, 99, leg.missionTypeIndex)
+            end
+        end
+    end
+end
+
+loadSettings()
+
+-- Returns true when the caller should keep running (a retry was granted).
+local function handleFailure(reason, retryable)
+    stats.failures = stats.failures + 1
+    lastFailure = reason
+    failureStreak = failureStreak + 1
+    if retryable and failureStreak <= retryLimit then
+        local delaySeconds = 15 * failureStreak
+        stats.retries = stats.retries + 1
+        echo(string.format('%s Retrying in %d seconds (%d/%d).', reason, delaySeconds, failureStreak, retryLimit))
+        for _ = 1, delaySeconds * 4 do
+            mq.doevents()
+            if not active then return false end
+            mq.delay(250)
+        end
+        return true
+    end
+    active = false
+    mq.cmd('/nav stop')
+    stopSwarmPull(false)
+    echo(reason .. ' Runner paused; resolve the issue, then use /ldon resume.')
+    return false
 end
 
 local function windowText(windowName, childName)
@@ -428,12 +647,17 @@ local function hasRouteFromSavedPoint(pointIndex)
     return false
 end
 
+local meshLastSampleAt = 0
+
 local function sampleMeshRecoveryPoint(zone)
     if meshRecoveryZone ~= zone then
         meshRecoveryZone = zone
         meshRecoveryPoints = {}
         meshLastSample = nil
     end
+    local now = mq.gettime()
+    if now - meshLastSampleAt < 2000 then return end
+    meshLastSampleAt = now
     if not navigationMeshLoaded() then
         meshLastSample = nil
         return
@@ -497,6 +721,35 @@ local function moveToRoutePoint(y, x, startZone)
     return active and (zoneId() ~= startZone or distanceTo(y, x) <= 12)
 end
 
+-- Optional MQ2AdvPath recordings (RedGuides). Paths are named ldon_<key> and recorded
+-- with /ldon record; the runner falls back to its own navigation when none is played.
+local function advPathLoaded()
+    return pluginLoaded('MQ2AdvPath')
+end
+
+local function playRecordedPath(key, startZone)
+    if not useAdvPath or not advPathLoaded() then return false end
+    local pathName = 'ldon_' .. key
+    mq.cmd('/nav stop')
+    mq.cmdf('/play %s noloop smart door', pathName)
+    local started = false
+    for tick = 1, 240 * 4 do
+        mq.doevents()
+        if not active then mq.cmd('/play off'); return false end
+        if startZone and zoneId() ~= startZone then return true end
+        local playing = mq.TLO.AdvPath.Playing() == true
+        if playing then started = true end
+        if not playing and (started or tick > 16) then break end
+        mq.delay(250)
+    end
+    if not started then
+        echo('No MQ2AdvPath recording named "' .. pathName .. '" was played; using built-in navigation.')
+        return false
+    end
+    mq.cmd('/play off')
+    return true
+end
+
 local function runZoneCrossing(route)
     if mq.TLO.Plugin('MQ2Nav').IsLoaded() ~= true then
         echo('MQ2Nav is required for recorded LDoN zone-line routes.')
@@ -548,7 +801,19 @@ local function travelAcrossZones(path)
                 echo('No recorded zone-line route from ' .. current .. ' to ' .. destination .. '.')
                 return false
             end
-            if not runZoneCrossing(route) then return false end
+            local crossed = false
+            local before = zoneId()
+            local key = current .. '_to_' .. destination
+            if advPathFirst then
+                crossed = playRecordedPath(key, before) and (zoneId() ~= before or waitForZoneChange(before, 10))
+            end
+            if not crossed and zoneId() == before then
+                crossed = runZoneCrossing(route)
+                if not crossed and not advPathFirst and zoneId() == before then
+                    crossed = playRecordedPath(key, before) and (zoneId() ~= before or waitForZoneChange(before, 10))
+                end
+            end
+            if not crossed then return false end
             mq.delay(5000)
         end
     end
@@ -577,6 +842,8 @@ local function moveThroughBoundary(heading, seconds)
     return active
 end
 
+local useMagus
+
 local function returnToHub()
     local zone = zoneId()
     if homeHubZone == 68 and zone == 57 then
@@ -598,14 +865,7 @@ local function returnToHub()
         local before = zoneId()
         return moveThroughBoundary(330, 3) and waitForZoneChange(before, 30)
     elseif homeHubZone == 408 and zone == 393 then
-        if not navToSpawn('Magus Jerira') then return false end
-        local magusId = tonumber(mq.TLO.Spawn('npc Magus Jerira').ID()) or 0
-        if magusId == 0 then return false end
-        mq.cmdf('/target id %d', magusId)
-        mq.cmd('/keypress H')
-        mq.delay(1000)
-        mq.cmd('/say commonlands')
-        return waitForZoneChange(393, 90)
+        return useMagus('commonlands', 'Magus Jerira')
     end
     return zoneId() == homeHubZone
 end
@@ -738,6 +998,8 @@ local function configureGroupCombat()
     combatRunStartedAt = mq.gettime()
     combatRunSends = 1
     combatZone = zoneId()
+    startLongBuffs()
+    startSwarmPull()
     echo(grouped and
         'Group leader set to Puller (Hunt); ' .. selected .. ' is the Main Assist' ..
             (selected:lower() ~= me:lower() and ' and also set to Puller (Hunt)' or '') ..
@@ -1075,7 +1337,7 @@ breakInvisibilityForInteraction = function(destination)
     return false
 end
 
-local function useMagus(destination, magusName)
+function useMagus(destination, magusName)
     local interactionRange = 10
     local startZone = zoneId()
     local magus = mq.TLO.Spawn('npc ' .. (magusName or MAGUS_NAMES_BY_ZONE[startZone] or 'Magus'))
@@ -1109,12 +1371,31 @@ local function useMagus(destination, magusName)
         end
         local approachY = magusY + offsetY / planarDistance * 6
         local approachX = magusX + offsetX / planarDistance * 6
-        if not navToLocation(approachY, approachX, nil, 2) then
+        -- The mesh often snaps the approach point a few units away; accept any
+        -- spot that ends up in talking range, then fall back to walking at the NPC.
+        navToLocation(approachY, approachX, nil, 5, 30)
+        if (tonumber(mq.TLO.Spawn(magusId).Distance3D()) or math.huge) > interactionRange then
+            mq.cmd('/nav stop')
+            mq.cmdf('/nav id %d', magusId)
+            waitForNavigation(30, function()
+                return (tonumber(mq.TLO.Spawn(magusId).Distance3D()) or math.huge) <= interactionRange - 2
+            end)
+            mq.cmd('/nav stop')
+        end
+        if (tonumber(mq.TLO.Spawn(magusId).Distance3D()) or math.huge) > interactionRange then
+            mq.cmdf('/moveto loc %.2f %.2f', magusY, magusX)
+            for _ = 1, 24 do
+                mq.delay(250)
+                if (tonumber(mq.TLO.Spawn(magusId).Distance3D()) or math.huge) <= interactionRange - 2 then break end
+            end
+            mq.cmd('/moveto off')
+        end
+        if (tonumber(mq.TLO.Spawn(magusId).Distance3D()) or math.huge) > interactionRange then
             echo('Could not navigate to a close interaction point at the Magus.')
             return false
         end
     end
-    local magusDistance = tonumber(magusSpawn.Distance3D()) or math.huge
+    local magusDistance = tonumber(mq.TLO.Spawn(magusId).Distance3D()) or math.huge
     if magusDistance > interactionRange then
         echo(string.format('Navigation stopped %.0f units from the Magus; not attempting dialogue.', magusDistance))
         return false
@@ -1211,16 +1492,33 @@ local function clickSwitch(switchId)
             local approachY = doorY + (directionY * cosine - directionX * sine) * 10
             local approachX = doorX + (directionY * sine + directionX * cosine) * 10
             mq.cmd('/nav stop')
-            if navToLocation(approachY, approachX, nil, 2, 30) then
-                mq.cmdf('/doortarget id %d', doorId)
-                mq.delay(250)
-                local targetedId = tonumber(mq.TLO.DoorTarget.ID()) or 0
-                distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
-                if targetedId ~= 0 and targetedId == doorId and distance <= 15 then
-                    reachedClickRange = true
-                    break
-                end
+            -- The mesh snaps the point to another floor, so a "failed" nav can still
+            -- leave the character in click range; judge by the door distance instead.
+            navToLocation(approachY, approachX, nil, 4, 30)
+            mq.cmdf('/doortarget id %d', doorId)
+            mq.delay(250)
+            local targetedId = tonumber(mq.TLO.DoorTarget.ID()) or 0
+            distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
+            if targetedId ~= 0 and targetedId == doorId and distance <= 15 then
+                reachedClickRange = true
+                break
             end
+        end
+        if not reachedClickRange then
+            echo('Navmesh could not place me within click range; walking straight to the switch.')
+            mq.cmd('/nav stop')
+            mq.cmdf('/moveto loc %.2f %.2f', doorY, doorX)
+            for _ = 1, 40 do
+                mq.delay(250)
+                mq.cmdf('/doortarget id %d', doorId)
+                distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
+                if distance <= 12 then break end
+            end
+            mq.cmd('/moveto off')
+            mq.cmdf('/doortarget id %d', doorId)
+            mq.delay(250)
+            distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
+            reachedClickRange = distance <= 15
         end
         if not reachedClickRange then
             echo('Could not navigate to a reachable point within click range of the LDoN entrance switch.')
@@ -1256,8 +1554,19 @@ local function enterTask(_, dialogue)
             switch = 1,
         }
     elseif homeHubZone == 393 then
-        if text:find('cauldron of lost souls', 1, true) then
-            entrance = { zone = 'innothule', switch = 0, path = {'innothule'} }
+        local function mentions(...)
+            for _, phrase in ipairs({...}) do
+                if text:find(phrase, 1, true) then return true end
+            end
+            return false
+        end
+        if mentions('barricaded door', 'guk portal', 'root garden') then
+            entrance = { zone = 'guktop', switch = 0, path = {'innothule', 'guktop'} }
+        elseif mentions('cauldron of lost souls', 'rotting tree trunk', 'tree trunk', 'innothule') then
+            entrance = {
+                zone = 'innothule', switch = 0, path = {'innothule'},
+                waypoints = { { 1389.12, 1145.40, -15.62 }, { 1245.50, 1186.58, -10.49 } },
+            }
         else
             entrance = { zone = 'guktop', switch = 0, path = {'innothule', 'guktop'} }
         end
@@ -1279,7 +1588,7 @@ local function enterTask(_, dialogue)
         echo('No entrance route is configured for the selected camp.')
         return false
     end
-    if entrance.path and not travelAcrossZones(entrance.path) then return false end
+    if entrance.path and zoneShortName() ~= entrance.zone and not travelAcrossZones(entrance.path) then return false end
     if zoneShortName() ~= entrance.zone then
         echo('Expected entrance zone ' .. entrance.zone .. ', but arrived in ' .. zoneShortName() .. '.')
         return false
@@ -1288,7 +1597,18 @@ local function enterTask(_, dialogue)
         echo('Could not reach the recorded zone-line approach NPC "' .. entrance.approachSpawn .. '".')
         return false
     end
-    return clickSwitch(entrance.switch)
+    if entrance.waypoints then
+        for _, point in ipairs(entrance.waypoints) do
+            if not navToLocation(point[1], point[2], point[3], 3, 60) then
+                echo('Could not reach the entrance approach point.')
+                return false
+            end
+        end
+    end
+    if clickSwitch(entrance.switch) then return true end
+    if zoneShortName() ~= entrance.zone then return false end
+    local switchKey = 'switch_' .. entrance.zone .. '_' .. tostring(entrance.switch)
+    return playRecordedPath(switchKey, zoneId()) and clickSwitch(entrance.switch)
 end
 
 local function waitUntilSafeToExit()
@@ -1447,6 +1767,13 @@ local function returnToCampaignRecruiter(targetHubZone)
     local currentZone = zoneId()
     if DUNGEONS[currentZone] and not waitUntilSafeToExit() then return false end
     local returned = currentZone == targetHubZone
+    local outsideLdon = not DUNGEONS[currentZone] and not ENTRY_ZONES[currentZone]
+    if not returned and outsideLdon and zoneId() == 151 and MAGUS_DESTINATIONS[targetHubZone] then
+        returned = useMagus(MAGUS_DESTINATIONS[targetHubZone], MAGUS_NAMES_BY_ZONE[151])
+    elseif not returned and outsideLdon and hasBazaarAndBack then
+        echo('Not in an LDoN zone; using Bazaar and Back to reach ' .. hub.name .. '.')
+        returned = returnViaBazaarAndMagus()
+    end
     if not returned and DUNGEONS[currentZone] and hasBazaarAndBack and aaReady then
         returned = returnViaBazaarAndMagus()
     end
@@ -1518,7 +1845,10 @@ local function exitTask(zone)
     if not waitUntilSafeToExit() then return false end
     if (tonumber(mq.TLO.Group()) or 0) == 0 then
         mq.cmd('/ac pause')
-        return returnViaBazaarAndMagus()
+        if returnViaBazaarAndMagus() then return true end
+        if not DUNGEONS[zoneId()] then return false end
+        echo('Bazaar and Back did not complete; using the dungeon exit and existing return route.')
+        return returnToCampaignRecruiter(homeHubZone)
     end
     mq.cmd('/ac net group pause')
     return returnGroupToCampaignRecruiter()
@@ -1555,6 +1885,12 @@ local function beginCampaign()
         campaignTravelPending = false
         campaignStopPending = false
         campaignInitialized = true
+        stats.startedAt = 0
+        stats.dungeons = 0
+        stats.failures = 0
+        stats.retries = 0
+        stats.dungeonSeconds = 0
+        stats.dungeonStartedAt = 0
         local activeLegCount = 0
         for _, leg in ipairs(campaignPlan) do
             if (leg.count or 0) > 0 then activeLegCount = activeLegCount + 1 end
@@ -1563,13 +1899,92 @@ local function beginCampaign()
             activeLegCount, HUBS[campaignLeg().hubZone].name))
     end
     active = true
+    if stats.startedAt == 0 then stats.startedAt = os.time() end
+    failureStreak = 0
+    saveSettings()
     if meshFailureActive then meshRecoveryRequested = true end
     return true
+end
+
+-- Starts the runner from any zone; the main loop travels to the first camp when needed.
+local function startRunner()
+    if not resolveHomeHub() then
+        echo('Select at least one camp with a nonzero dungeon count, then press Start. You can start in any zone.')
+        return false
+    end
+    if not validateTravelSetup() then return false end
+    if not beginCampaign() then return false end
+    local zone = zoneId()
+    if not HUBS[zone] and not ENTRY_ZONES[zone] and not DUNGEONS[zone] then
+        echo('You are not in an LDoN zone. The runner will travel to ' .. HUBS[homeHubZone].name ..
+            ' first and request an adventure if you do not already have one.')
+    end
+    return true
+end
+
+-- Walks or ports the group to the camp that owns the current assignment, or the first camp.
+local function travelToStartHub(dialogue, assigned, completed)
+    local target = assigned and not completed and hubFromAssignment(dialogue) or nil
+    if not target then
+        local leg = campaignLeg()
+        target = leg and leg.hubZone or homeHubZone
+    end
+    if not target or not HUBS[target] then return false end
+    homeHubZone = target
+    if (tonumber(mq.TLO.Group()) or 0) > 0 then return returnGroupToCampaignRecruiter() end
+    return returnToCampaignRecruiter(target)
+end
+
+-- Presses Leave Adventure on a finished assignment so the window returns to its request state.
+local function clearFinishedAssignment()
+    if not mq.TLO.Window('AdventureRequestWnd').Open() then
+        mq.cmd('/windowstate AdventureRequestWnd open')
+        mq.delay(500)
+    end
+    mq.cmd('/notify AdventureRequestWnd AdvRqst_RequestButton leftmouseup')
+    mq.delay(1000)
+    if mq.TLO.Window('ConfirmationDialogBox').Open() then
+        mq.cmd('/notify ConfirmationDialogBox Yes_Button leftmouseup')
+    end
+    if mq.TLO.Window('LargeDialogWindow').Open() then
+        mq.cmd('/notify LargeDialogWindow LDW_YesButton leftmouseup')
+    end
+    mq.delay(1500)
+    return not (assignmentState())
+end
+
+-- Returns the runner and window to the idle state so a new run can begin without a restart.
+local function finishCampaign(message)
+    active = false
+    campaignInitialized = false
+    campaignStopPending = false
+    campaignTravelPending = false
+    campaignTaskCounted = false
+    campaignLegIndex = nextCampaignLeg(1) or 1
+    for index = 1, #campaignPlan do campaignCompleted[index] = 0 end
+    travelReady = false
+    combatZone = 0
+    combatRunSends = 0
+    adventureCompleted = false
+    failureStreak = 0
+    lastNotice = ''
+    stopSwarmPull(false)
+    mq.cmd('/nav stop')
+    mq.cmd('/ac pause')
+    if (tonumber(mq.TLO.Group()) or 0) > 0 then mq.cmd('/ac net group pause') end
+    saveSettings()
+    echo(message)
 end
 
 local function recordCampaignCompletion()
     if campaignTaskCounted then return end
     campaignTaskCounted = true
+    failureStreak = 0
+    stats.dungeons = stats.dungeons + 1
+    if stats.dungeonStartedAt > 0 then
+        stats.dungeonSeconds = stats.dungeonSeconds + (os.time() - stats.dungeonStartedAt)
+        stats.dungeonStartedAt = 0
+    end
     local leg = campaignLeg()
     if not leg then
         campaignStopPending = true
@@ -1628,6 +2043,98 @@ local function selectedAssistIndex(names)
     return 1
 end
 
+-- Preflight checklist, run summary, and diagnostics text for the window and /ldon commands.
+local CAMP_MESH_ZONES = {
+    [392] = { 'nro' },
+    [408] = { 'commons' },
+    [393] = { 'sro', 'innothule', 'guktop' },
+    [68] = { 'butcher', 'gfaydark', 'lfaydark' },
+    [30] = { 'everfrost' },
+}
+
+local function runPreflight()
+    local results = {}
+    local function check(passed, label, detail)
+        results[#results + 1] = { passed = passed, text = label .. (detail and (': ' .. detail) or '') }
+    end
+    check(pluginLoaded('MQ2Nav'), 'MQ2Nav loaded')
+    check(pluginLoaded('MQ2MoveUtils'), 'MQ2MoveUtils loaded')
+    check(tostring(mq.TLO.Lua.Script('triune').Status() or '') == 'RUNNING', 'Triune running')
+    local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
+    if grouped then
+        check(pluginLoaded('MQ2EQBC') or pluginLoaded('MQ2DanNet'), 'BoxNet transport plugin loaded')
+    else
+        check(mq.TLO.Me.AltAbility(331)() and true or false, 'Bazaar and Back AA 331 trained')
+    end
+    local meshDirectory = tostring(mq.TLO.MacroQuest.Path('resources')() or 'resources'):gsub('\\', '/') .. '/MQ2Nav/'
+    local seen = {}
+    local missing = {}
+    local function needMesh(shortName)
+        if seen[shortName] then return end
+        seen[shortName] = true
+        local file = io.open(meshDirectory .. shortName .. '.navmesh', 'r')
+        if file then file:close() else missing[#missing + 1] = shortName end
+    end
+    needMesh('bazaar')
+    for _, leg in ipairs(campaignPlan) do
+        if (leg.count or 0) > 0 then
+            for _, shortName in ipairs(CAMP_MESH_ZONES[leg.hubZone] or {}) do needMesh(shortName) end
+        end
+    end
+    check(#missing == 0, 'Navmeshes for the selected camps',
+        #missing > 0 and ('missing ' .. table.concat(missing, ', ')) or nil)
+    if useLongBuffs then
+        local rosterCount = longBuffRosterCount()
+        check(longBuffsInstalled() and (rosterCount or 0) > 0, 'Long-Duration Buffs',
+            not longBuffsInstalled() and 'lua/tac/long_buffs.lua not found'
+            or ((rosterCount or 0) == 0 and 'roster is empty; build it in Triune Settings > Plugins' or nil))
+    end
+    if useSwarmPull then
+        check(swarmPullInstalled(), 'Swarm Pull plugin', not swarmPullInstalled() and 'plugin file not found in lua/tac' or nil)
+    end
+    if useAdvPath then
+        check(advPathLoaded(), 'MQ2AdvPath loaded', not advPathLoaded() and 'use /plugin MQ2AdvPath' or nil)
+    end
+    preflightResults = results
+    local failed = 0
+    for _, result in ipairs(results) do
+        if not result.passed then failed = failed + 1 end
+        echo((result.passed and 'OK   ' or 'FAIL ') .. result.text)
+    end
+    echo(failed == 0 and 'Preflight passed.' or string.format('Preflight found %d problem(s).', failed))
+    return failed == 0
+end
+
+local function formatDuration(seconds)
+    seconds = math.max(0, math.floor(seconds))
+    return string.format('%d:%02d:%02d', math.floor(seconds / 3600), math.floor(seconds % 3600 / 60), seconds % 60)
+end
+
+local function runSummary()
+    local elapsed = stats.startedAt > 0 and (os.time() - stats.startedAt) or 0
+    local average = stats.dungeons > 0 and math.floor(stats.dungeonSeconds / stats.dungeons) or 0
+    return string.format('Elapsed %s | dungeons %d (avg %s) | failures %d | retries %d',
+        formatDuration(elapsed), stats.dungeons, formatDuration(average), stats.failures, stats.retries)
+end
+
+local function diagnosticsText()
+    local assigned, completed, _, progress = assignmentState()
+    local lines = {
+        'LDoN Triune Runner v' .. VERSION,
+        string.format('zone=%s active=%s assigned=%s completed=%s progress="%s"',
+            tostring(mq.TLO.Zone.ShortName() or '?'), tostring(active), tostring(assigned), tostring(completed), progress),
+        string.format('leg=%d homeHub=%d grouped=%s mainAssist=%s', campaignLegIndex, homeHubZone,
+            tostring((tonumber(mq.TLO.Group()) or 0) > 0), mainAssistName),
+        string.format('longBuffs=%s swarmPull=%s swarmActive=%s retryLimit=%d', tostring(useLongBuffs),
+            tostring(useSwarmPull), tostring(swarmActive), retryLimit),
+        'lastFailure=' .. (lastFailure ~= '' and lastFailure or 'none'),
+        runSummary(),
+        '--- recent log ---',
+    }
+    for _, line in ipairs(recentLog) do lines[#lines + 1] = line end
+    return table.concat(lines, '\n')
+end
+
 -- Zone-themed artwork and the main campaign window.
 local ART_THEMES = {
     takish = {
@@ -1679,9 +2186,44 @@ local function missionArtTheme()
     return ART_THEMES.takish
 end
 
+-- Reads the real pixel size from a PNG or JPEG header; the texture size reported by
+-- MacroQuest is the (possibly padded) GPU texture size, not the image size.
+local function imageFileSize(path)
+    local file = io.open(path, 'rb')
+    if not file then return nil end
+    local data = file:read('*a')
+    file:close()
+    if not data or #data < 24 then return nil end
+    if data:sub(2, 4) == 'PNG' then
+        local w1, w2, w3, w4, h1, h2, h3, h4 = data:byte(17, 24)
+        return w1 * 16777216 + w2 * 65536 + w3 * 256 + w4, h1 * 16777216 + h2 * 65536 + h3 * 256 + h4
+    end
+    if data:byte(1) == 0xFF and data:byte(2) == 0xD8 then
+        local pos = 3
+        while pos + 9 <= #data do
+            if data:byte(pos) ~= 0xFF then
+                pos = pos + 1
+            else
+                local marker = data:byte(pos + 1)
+                if marker == 0xFF then
+                    pos = pos + 1
+                elseif marker >= 0xC0 and marker <= 0xCF and marker ~= 0xC4 and marker ~= 0xC8 and marker ~= 0xCC then
+                    local h1, h2, w1, w2 = data:byte(pos + 5, pos + 8)
+                    return w1 * 256 + w2, h1 * 256 + h2
+                else
+                    local l1, l2 = data:byte(pos + 2, pos + 3)
+                    pos = pos + 2 + l1 * 256 + l2
+                end
+            end
+        end
+    end
+    return nil
+end
+
 local sourcePath = debug.getinfo(1, 'S').source:gsub('^@', '')
 local scriptDirectory = sourcePath:match('^(.*)[/\\]') or '.'
 local artTextures = {}
+local artSourceSizes = {}
 local unavailableArt = {}
 for family in pairs(ART_THEMES) do
     local filename = ART_THEMES[family].file or (family .. '.png')
@@ -1692,6 +2234,8 @@ for family in pairs(ART_THEMES) do
         local ok, texture = pcall(mq.CreateTexture, path)
         if ok and texture then
             artTextures[family] = texture
+            local imageWidth, imageHeight = imageFileSize(path)
+            if imageWidth and imageHeight then artSourceSizes[family] = { w = imageWidth, h = imageHeight } end
         else
             unavailableArt[#unavailableArt + 1] = filename
         end
@@ -1704,6 +2248,31 @@ if #unavailableArt > 0 then
         '); continuing with the runner UI without those images.')
 end
 
+-- Crops to cover the target area without stretching, sampling only the real image
+-- region of a texture that may be padded to a larger size.
+local function artUvRect(family, texture, areaWidth, areaHeight)
+    local source = artSourceSizes[family]
+    local size = texture.size
+    local textureWidth = size and tonumber(size.x) or 0
+    local textureHeight = size and tonumber(size.y) or 0
+    if not source or areaWidth <= 0 or areaHeight <= 0 then return 0, 0, 1, 1 end
+    local imageWidth, imageHeight = source.w, source.h
+    local maxU, maxV = 1, 1
+    if textureWidth >= imageWidth and textureHeight >= imageHeight then
+        maxU = imageWidth / textureWidth
+        maxV = imageHeight / textureHeight
+    end
+    local visibleU, visibleV = 1, 1
+    if areaWidth / areaHeight > imageWidth / imageHeight then
+        visibleV = (imageWidth / imageHeight) / (areaWidth / areaHeight)
+    else
+        visibleU = (areaWidth / areaHeight) / (imageWidth / imageHeight)
+    end
+    local startU = (1 - visibleU) / 2
+    local startV = (1 - visibleV) / 2
+    return startU * maxU, startV * maxV, (startU + visibleU) * maxU, (startV + visibleV) * maxV
+end
+
 local function drawMissionBackground()
     local theme = missionArtTheme()
     local texture = artTextures[theme.asset]
@@ -1714,7 +2283,8 @@ local function drawMissionBackground()
         local windowSize = ImGui.GetWindowSizeVec()
         local topLeft = ImVec2(windowPos.x + 1, cursor.y)
         local bottomRight = ImVec2(windowPos.x + windowSize.x - 1, windowPos.y + windowSize.y - 1)
-        drawList:AddImage(texture:GetTextureID(), topLeft, bottomRight, ImVec2(0, 0), ImVec2(1, 1))
+        local u0, v0, u1, v1 = artUvRect(theme.asset, texture, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y)
+        drawList:AddImage(texture:GetTextureID(), topLeft, bottomRight, ImVec2(u0, v0), ImVec2(u1, v1))
         drawList:AddRectFilled(topLeft, bottomRight, 0xA8000000)
     end
 
@@ -1784,13 +2354,10 @@ local function drawUI()
             if active then
                 active = false
                 mq.cmd('/nav stop')
+                stopSwarmPull(false)
+                saveSettings()
             else
-                if homeHubZone == 0 then selectHomeHub() end
-                if homeHubZone ~= 0 and validateTravelSetup() then
-                    beginCampaign()
-                elseif homeHubZone == 0 then
-                    echo('Start from one of the supported LDoN hubs or an LDoN instance.')
-                end
+                startRunner()
             end
         end
         ImGui.SameLine()
@@ -1799,7 +2366,14 @@ local function drawUI()
             if ImGui.Button('Open navigation diagnostics') then meshPopupOpen = true end
         end
         ImGui.Separator()
-        ImGui.TextWrapped('Difficulty: Hard')
+        ImGui.TextWrapped('Adventure difficulty')
+        ImGui.SetNextItemWidth(160)
+        local difficultyChoice = ImGui.Combo('##difficulty', hardMode and 2 or 1, { 'Normal', 'Hard' })
+        if difficultyChoice then hardMode = difficultyChoice == 2 end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Risk level requested from the recruiter for every adventure. Applies to the next adventure request.') end
+        local swarmToggle = ImGui.Checkbox('Use Swarm Pull (Triune AutoCombat plugin) inside dungeons', useSwarmPull)
+        if swarmToggle ~= useSwarmPull then setSwarmPull(swarmToggle) end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Pulls groups of mobs at once. Best for kill or mob-count tasks. Pull count and radius are under Options.') end
         local names = groupNames()
         local assistIndex = selectedAssistIndex(names)
         ImGui.TextWrapped('Main Assist / puller')
@@ -1809,6 +2383,90 @@ local function drawUI()
         autoStandInCombat = ImGui.Checkbox('Auto-stand from sitting / Feign Death in combat', autoStandInCombat)
         ImGui.TextWrapped('Only when you and all group members are above 50% HP.')
         campaignLoop = ImGui.Checkbox('Repeat campaign after final camp', campaignLoop)
+        ImGui.Separator()
+        ImGui.TextWrapped(runSummary())
+        if lastFailure ~= '' then ImGui.TextWrapped('Last failure: ' .. lastFailure) end
+        if ImGui.Button('Stop after current dungeon') then
+            campaignStopPending = true
+            echo('The campaign will stop after the current dungeon is completed and the runner returns to camp.')
+        end
+        ImGui.SameLine()
+        if ImGui.Button('Run preflight check') then runPreflight() end
+        ImGui.SameLine()
+        if ImGui.Button('Copy diagnostics') then ImGui.SetClipboardText(diagnosticsText()) end
+        ImGui.SameLine()
+        if ImGui.Button('Save settings') then
+            echo(saveSettings() and 'Settings saved.' or 'Could not write the settings file.')
+        end
+        for _, result in ipairs(preflightResults) do
+            if result.passed then
+                ImGui.TextColored(0.45, 0.9, 0.55, 1.0, 'OK    ' .. result.text)
+            else
+                ImGui.TextColored(1.0, 0.45, 0.35, 1.0, 'FAIL  ' .. result.text)
+            end
+        end
+        if not active and not campaignInitialized then
+            ImGui.TextColored(0.95, 0.78, 0.38, 1.0, 'Quick start: 1) pick your Main Assist  2) choose runs and task type for each camp below  3) press Start campaign.')
+        end
+        if ImGui.CollapsingHeader('How to use this window') then
+            ImGui.TextWrapped('1. Form your group (if grouped) and stand anywhere. In a supported LDoN camp the runner starts right there; from any other zone it travels to your first camp using Bazaar and Back and the Magus, and only requests an adventure if you do not already have one.')
+            ImGui.TextWrapped('2. Click "Run preflight check". Anything marked FAIL tells you what to fix first.')
+            ImGui.TextWrapped('3. Choose the Main Assist, then set runs and task type for each camp in the table.')
+            ImGui.TextWrapped('4. Press "Start campaign". Use "Stop after current dungeon" for a clean stop, or Pause at any time.')
+            ImGui.TextWrapped('Your choices are saved per character. The defaults are safe: you do not need the options below to run.')
+            ImGui.TextWrapped('Commands: /ldon start | pause | finish | preflight | save')
+        end
+        if ImGui.CollapsingHeader('Options and optional plugins') then
+            if ImGui.Button('Apply recommended settings') then
+                retryLimit = 2
+                stopAfterMinutes = 0
+                useLongBuffs = longBuffsInstalled()
+                useAdvPath = false
+                advPathFirst = false
+                useSwarmPull = false
+                hardMode = true
+                echo('Recommended settings applied.')
+            end
+            ImGui.TextWrapped('Recommended: auto-retry 2, Long-Duration Buffs on if installed, everything else off until you need it.')
+            ImGui.Separator()
+            ImGui.TextColored(0.95, 0.78, 0.38, 1.0, 'Basic')
+            retryLimit = ImGui.SliderInt('Auto-retry limit', retryLimit, 0, 5)
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('How many times a failed step is retried before the runner pauses. Recommended: 2.') end
+            stopAfterMinutes = ImGui.SliderInt('Stop after minutes (0 = off)', stopAfterMinutes, 0, 480)
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('Finish the current dungeon once this many minutes have passed, then stop. 0 means never.') end
+            ImGui.Separator()
+            ImGui.TextColored(0.95, 0.78, 0.38, 1.0, 'Advanced (optional plugins)')
+            useLongBuffs = ImGui.Checkbox('Long-Duration Buffs (Triune plugin by Triune)', useLongBuffs)
+            if longBuffsInstalled() then
+                ImGui.TextColored(0.45, 0.9, 0.55, 1.0, 'Installed. Recommended: on. Build the roster once in Triune Settings > Plugins.')
+            else
+                ImGui.TextColored(1.0, 0.45, 0.35, 1.0, 'Not installed. Leave this off, or add tac\\long_buffs.lua.')
+            end
+            useAdvPath = ImGui.Checkbox('MQ2AdvPath recorded routes (for trouble spots)', useAdvPath)
+            if advPathLoaded() then
+                ImGui.TextColored(0.45, 0.9, 0.55, 1.0, 'Plugin loaded. Only helps where you have recorded a route; otherwise leave off.')
+            else
+                ImGui.TextColored(1.0, 0.45, 0.35, 1.0, 'MQ2AdvPath is not loaded. Run /plugin MQ2AdvPath first.')
+            end
+            if useAdvPath then
+                advPathFirst = ImGui.Checkbox('Try recordings before built-in navigation', advPathFirst)
+                if ImGui.IsItemHovered() then ImGui.SetTooltip('Off (recommended): built-in navigation first, recording only as a fallback.') end
+                ImGui.TextWrapped('To record: stand at the start, type /ldon record start, walk the route, then /ldon record save <key>. Keys: sro_to_innothule, innothule_to_guktop, butcher_to_gfaydark, gfaydark_to_lfaydark, switch_guktop_0.')
+            end
+            ImGui.TextColored(0.95, 0.78, 0.38, 1.0, 'Swarm Pull (plugin by matth)')
+            if swarmPullInstalled() then
+                ImGui.TextColored(0.45, 0.9, 0.55, 1.0, 'Installed. Best for kill or mob-count tasks; skip it for rescue, recover or explore tasks.')
+            else
+                ImGui.TextColored(1.0, 0.45, 0.35, 1.0, 'Not installed. Leave this off, or add tac\\Swarm_Pull_v2.0.lua.')
+            end
+            if useSwarmPull then
+                swarmPullCount = ImGui.SliderInt('Pull count', swarmPullCount, 1, 20)
+                if ImGui.IsItemHovered() then ImGui.SetTooltip('Mobs pulled at once. Start low (3-5) and raise it if your group handles it.') end
+                swarmPullRadius = ImGui.SliderInt('Pull radius', swarmPullRadius, 20, 1000)
+                if ImGui.IsItemHovered() then ImGui.SetTooltip('How far to look for mobs. 150-300 is typical.') end
+                ImGui.TextWrapped('Important: turn off "Reset via Bazaar when idle" in the Swarm Pull window, or it can pull you out of the dungeon.')
+            end
+        end
         ImGui.Separator()
         ImGui.TextWrapped("Camps follow this server's unlock order; skipped camps are left out.")
         if ImGui.BeginTable('##campaignPlan', 4, ImGuiTableFlags.SizingStretchProp) then
@@ -1969,16 +2627,53 @@ local function command(...)
     if action == 'meshfail' then
         onMeshFailure(args[2], args[3], args[4], args[5])
     elseif action == 'start' or action == 'resume' then
-        if homeHubZone == 0 then selectHomeHub() end
-        if homeHubZone ~= 0 and validateTravelSetup() then
-            if beginCampaign() then echo('Task runner resumed.') end
-        elseif homeHubZone == 0 then
-            echo('Start from one of the supported LDoN hubs or an LDoN instance.')
-        end
+        if startRunner() then echo('Task runner resumed.') end
     elseif action == 'pause' or action == 'stop' then
         active = false
         mq.cmd('/nav stop')
+        if useAdvPath and advPathLoaded() then mq.cmd('/play off') end
+        stopSwarmPull(false)
+        saveSettings()
         echo('Task runner paused. Triune combat was not changed.')
+    elseif action == 'record' then
+        local sub = tostring(args[2] or ''):lower()
+        if not advPathLoaded() then
+            echo('Load MQ2AdvPath first (/plugin MQ2AdvPath).')
+        elseif sub == 'start' then
+            mq.cmd('/record')
+            echo('Recording started. Walk the route (finish at the zone line or switch), then /ldon record save <key>.')
+        elseif sub == 'save' and args[3] and args[3] ~= '' then
+            mq.cmdf('/record save ldon_%s 20', args[3])
+            echo('Saved recording as ldon_' .. args[3] .. '. Enable MQ2AdvPath routes in the window to use it.')
+        elseif sub == 'play' and args[3] and args[3] ~= '' then
+            mq.cmdf('/play ldon_%s noloop smart door', args[3])
+        else
+            echo('/ldon record start | save <key> | play <key>')
+        end
+    elseif action == 'swarm' then
+        local sub = tostring(args[2] or ''):lower()
+        if sub == 'on' then
+            setSwarmPull(true)
+        elseif sub == 'off' then
+            setSwarmPull(false)
+        else
+            echo('Swarm Pull is ' .. (useSwarmPull and 'on' or 'off') .. '. Use /ldon swarm on | off.')
+        end
+    elseif action == 'difficulty' then
+        local sub = tostring(args[2] or ''):lower()
+        if sub == 'hard' or sub == 'normal' then
+            hardMode = sub == 'hard'
+            echo('Adventure difficulty set to ' .. sub .. '.')
+        else
+            echo('Difficulty is ' .. (hardMode and 'hard' or 'normal') .. '. Use /ldon difficulty normal | hard.')
+        end
+    elseif action == 'preflight' then
+        runPreflight()
+    elseif action == 'save' then
+        echo(saveSettings() and 'Settings saved to ' .. settingsPath or 'Could not write the settings file.')
+    elseif action == 'finish' then
+        campaignStopPending = true
+        echo('The campaign will stop after the current dungeon is completed and the runner returns to camp.')
     elseif action == 'remote-return' then
         local targetHubZone = tonumber(args[2])
         if not targetHubZone or not HUBS[targetHubZone] then
@@ -1995,8 +2690,10 @@ local function command(...)
         active = false
         shuttingDown = true
         mq.cmd('/nav stop')
+        stopSwarmPull(false)
     elseif action == 'status' then
         status()
+        echo(runSummary())
     elseif action == 'ui' then
         uiOpen = true
     elseif action == 'diagnostics' then
@@ -2030,7 +2727,11 @@ local function command(...)
             echo('Main Assist / puller set to ' .. mainAssistName .. '.')
         end
     elseif action == 'help' then
-        echo('/ldon start | status | pause | resume | exit | type <option> | ma <group name> | ui | diagnostics')
+        echo('/ldon start | status | pause | resume | exit | finish | preflight | save | type <option> | ma <group name> | ui | diagnostics')
+        echo('/ldon swarm on | off toggles Swarm Pull; /ldon difficulty normal | hard sets the adventure risk level.')
+        echo('/ldon record start | save <key> | play <key> records and plays optional MQ2AdvPath routes.')
+        echo('/ldon finish stops after the current dungeon; /ldon preflight checks plugins, meshes and optional integrations.')
+        echo('Settings are saved per character in the MacroQuest config folder; the log is logs/LDON_Triune.log.')
         echo('Configure up to five sequential camp legs in the window; each leg has its own dungeon count and mission type.')
         echo('Requires MQ2Nav, MQ2MoveUtils and a route mesh. Solo return uses Bazaar and Back AA 331.')
         echo('Solo and grouped runs are supported; grouped runs require leadership and must stay together.')
@@ -2061,12 +2762,23 @@ while not shuttingDown do
         if zone ~= lastZone then
             lastZone = zone
             lastNotice = ''
-            if not DUNGEONS[zone] then meshRecoveryRequested = false end
+            if not DUNGEONS[zone] then
+                meshRecoveryRequested = false
+                swarmActive = false
+            elseif stats.dungeonStartedAt == 0 then
+                stats.dungeonStartedAt = os.time()
+                stuckProgress = ''
+            end
+        end
+        if stopAfterMinutes > 0 and not campaignStopPending and stats.startedAt > 0
+            and os.time() - stats.startedAt >= stopAfterMinutes * 60 then
+            campaignStopPending = true
+            echo('Scheduled stop reached; finishing the current dungeon and then stopping.')
         end
         if not mq.TLO.Window('AdventureRequestWnd').Open() then
             mq.cmd('/windowstate AdventureRequestWnd open')
         end
-        local assigned, completed, dialogue = assignmentState()
+        local assigned, completed, dialogue, progress = assignmentState()
         local dungeon = DUNGEONS[zone]
         if dungeon then
             sampleMeshRecoveryPoint(zone)
@@ -2091,6 +2803,7 @@ while not shuttingDown do
                     meshRecoveryRequested = false
                     local notice = 'Task objective complete; waiting for combat to clear before exiting.'
                     if lastNotice ~= notice then echo(notice); lastNotice = notice end
+                    stopSwarmPull(true)
                     if exitTask(zone) then
                         recordCampaignCompletion()
                         lastNotice = ''
@@ -2103,17 +2816,25 @@ while not shuttingDown do
                             mq.cmd('/ac net group pause')
                         end
                     else
-                        active = false
-                        echo('Exit route failed; runner paused. Resolve the route issue, then use /ldon resume.')
+                        handleFailure('Exit route failed.', true)
                     end
                 else
-                    if combatRunSends < 4
+                    if not swarmActive and combatRunSends < 4
                         and mq.gettime() - combatRunStartedAt >= combatRunSends * 10000 then
                         mq.cmd('/ac run')
                         if (tonumber(mq.TLO.Group()) or 0) > 0 then
                             mq.cmd('/ac net group run')
                         end
                         combatRunSends = combatRunSends + 1
+                    end
+                    if progress ~= stuckProgress then
+                        stuckProgress = progress
+                        stuckSince = os.time()
+                        stuckWarned = false
+                    elseif not stuckWarned and os.time() - stuckSince >= 15 * 60 then
+                        stuckWarned = true
+                        lastFailure = 'No task progress for 15 minutes.'
+                        echo('No task progress for 15 minutes; check the character or use /ldon diagnostics.')
                     end
                     lastNotice = ''
                     mq.delay(1000)
@@ -2125,43 +2846,36 @@ while not shuttingDown do
                     active = false
                 elseif enterTask(zone, dialogue) then
                     lastNotice = ''
+                    failureStreak = 0
                 else
-                    active = false
-                    echo('Entrance route failed; runner paused. Resolve the route issue, then use /ldon resume.')
+                    handleFailure('Entrance route failed.', true)
                 end
             elseif homeHubZone ~= 0 and zone ~= homeHubZone then
                 if not travelReady and not configureGroupTravel() then
                     active = false
                 elseif returnToHub() then
                     lastNotice = ''
+                    failureStreak = 0
                 else
-                    local notice = 'Could not reach the configured task hub. Verify the return route and move there manually.'
-                    if lastNotice ~= notice then echo(notice); lastNotice = notice end
-                    active = false
+                    handleFailure('Could not reach the configured task hub.', true)
                 end
-            elseif campaignStopPending and not assigned then
-                active = false
-                campaignInitialized = false
-                campaignStopPending = false
-                campaignTravelPending = false
-                mq.cmd('/ac pause')
-                if (tonumber(mq.TLO.Group()) or 0) > 0 then
-                    mq.cmd('/ac net group pause')
-                end
-                echo('Campaign finished. The configured completed-dungeon counts have been reached.')
+            elseif campaignStopPending and (not assigned or completed) then
+                if assigned and completed then clearFinishedAssignment() end
+                finishCampaign('Campaign finished. The configured completed-dungeon counts have been reached. The window is ready for a new run.')
             elseif campaignTravelPending and not assigned then
                 local leg = campaignLeg()
                 if not leg or not travelToCamp(leg.hubZone) then
-                    active = false
-                    echo('Camp change failed; campaign paused. Resolve travel and use /ldon resume.')
+                    handleFailure('Camp change failed.', true)
                 else
                     campaignTravelPending = false
                     lastNotice = ''
+                    failureStreak = 0
                 end
             elseif assigned and completed then
-                local notice = 'The task is complete and you are outside the instance. Waiting for the assignment to clear.'
+                local notice = 'The task is complete and you are outside the instance. Clearing the finished assignment.'
                 if lastNotice ~= notice then echo(notice); lastNotice = notice end
                 mq.delay(3000)
+                if not clearFinishedAssignment() then mq.delay(10000) end
             else
                 local hub = HUBS[zone]
                 if hub then
@@ -2172,12 +2886,13 @@ while not shuttingDown do
                         if leg and leg.hubZone ~= zone then
                             if travelToCamp(leg.hubZone) then
                                 lastNotice = ''
+                                failureStreak = 0
                             else
-                                active = false
-                                echo('Camp travel failed; campaign paused. Resolve travel and use /ldon resume.')
+                                handleFailure('Camp travel failed.', true)
                             end
                         elseif requestTask(hub, campaignMissionType()) then
                             lastNotice = ''
+                            failureStreak = 0
                         else
                             mq.delay(10000)
                         end
@@ -2189,9 +2904,17 @@ while not shuttingDown do
                 end
             end
         else
-            local notice = 'Unsupported zone (' .. tostring(mq.TLO.Zone.ShortName() or zone) .. '). No movement issued.'
+            local notice = 'Not in an LDoN zone (' .. tostring(mq.TLO.Zone.ShortName() or zone) ..
+                '). Traveling to the starting camp.'
             if lastNotice ~= notice then echo(notice); lastNotice = notice end
-            mq.delay(5000)
+            if not travelReady and not configureGroupTravel() then
+                active = false
+            elseif travelToStartHub(dialogue, assigned, completed) then
+                lastNotice = ''
+                failureStreak = 0
+            else
+                handleFailure('Could not travel to the starting camp.', true)
+            end
         end
     else
         mq.delay(250)
@@ -2204,4 +2927,6 @@ mq.unbind('/ldonmeshfail')
 mq.imgui.destroy('LDONTriuneRunner')
 mq.imgui.destroy('LDONMeshDiagnostics')
 mq.cmd('/nav stop')
+stopSwarmPull(false)
+saveSettings()
 echo('Task runner exited.')

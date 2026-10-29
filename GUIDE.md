@@ -64,6 +64,32 @@ available mission option, and Main Assist. The script also provides:
 /ldon help
 ```
 
+### Reliability and optional plugins
+
+- Entrance, exit, hub-return and camp-travel failures retry with a growing
+  delay (limit set in **Options and optional plugins**, default 2) before the
+  runner pauses with the specific failure reason.
+- **Run preflight check** (`/ldon preflight`) verifies plugins, Triune, meshes
+  and any enabled optional plugin. **Copy diagnostics** copies state and the
+  recent log; the full log is `logs/LDON_Triune.log`.
+- **Stop after current dungeon** (`/ldon finish`) and the scheduled stop finish
+  the dungeon in progress, return to camp, then stop. Settings are saved per
+  character in the MacroQuest config folder.
+- **Long-Duration Buffs** (Triune plugin by Triune): when enabled, the runner
+  sends `/ac longbuff on` as combat starts. Build the roster in Triune first.
+- **Swarm Pull** (plugin by matth, optional, off by default): when enabled, the
+  runner starts `/ac swarm start` inside dungeons and stops it when the task
+  completes. Turn off Swarm Pull's "Reset via Bazaar when idle" so it never
+  leaves the dungeon. It suits kill and mob-count tasks.
+
+- **MQ2AdvPath** (optional, off by default): record a working walk with
+  `/ldon record start` then `/ldon record save <key>` and the runner can play it
+  back for a zone crossing (`sro_to_innothule`, `innothule_to_guktop`,
+  `gfaydark_to_lfaydark`, ...) or an entrance switch (`switch_guktop_0`). By
+  default recordings are a fallback after built-in navigation fails; "Try
+  recordings before built-in navigation" reverses that. Paths are saved in your
+  MQ2AdvPath config, not in this repository.
+
 ### Navigation diagnostics and recovery
 
 - Shows navigation/plugin status and current position information.
