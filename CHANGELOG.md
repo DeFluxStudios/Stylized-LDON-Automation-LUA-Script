@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to the LDoN Triune Runner are documented here. The script
-currently reports version **1.4.4**.
+currently reports version **1.4.5**.
 
 ## Version history note
 
@@ -10,6 +10,20 @@ release records. The entries before v1.3.2 below are therefore a retrospective
 feature ledger reconstructed from the current script and the available project
 history; they are not claims that matching releases or tags were previously
 published. The initial public package is v1.3.2.
+
+## [1.4.5] - 2026-10-29
+
+- Fix the Everfrost Peaks entrance (Miragul's Menagerie). The runner targeted
+  the nearest door, a wall switch (EFWALL1) it could not reach, instead of the
+  glimmering portal. It now walks to two recorded points, then targets and
+  clicks the nearest door object there (reporting its name and distance if it
+  cannot) and waits for the zone change. The portal route is untested in game.
+- Fix Triune not restarting after a death. When you died inside a dungeon and
+  the runner brought you back into the same dungeon, it believed combat was
+  already configured and left Triune paused. Leaving a dungeon zone now clears
+  that state, so `/ac run` and the Hunt setup are sent again on re-entry.
+- Correct the Long-Duration Buffs attribution: the plugin is by DeFluxStudios,
+  not Triune (runner window, comments, README, guide and plugin metadata).
 
 ## [1.4.4] - 2026-10-29
 
@@ -71,7 +85,7 @@ published. The initial public package is v1.3.2.
 - Save and load settings per character; add Stop after current dungeon
   (`/ldon finish`) and an optional scheduled stop.
 - Sample navmesh recovery points every two seconds instead of every loop.
-- Add optional integration with the Long-Duration Buffs Triune plugin (by Triune).
+- Add optional integration with the Long-Duration Buffs Triune plugin (by DeFluxStudios).
 - Add optional integration with the Swarm Pull Triune plugin (by matth); it is
   off by default and skipped when the plugin file is absent.
 - Add optional MQ2AdvPath (RedGuides) recorded routes for zone crossings and

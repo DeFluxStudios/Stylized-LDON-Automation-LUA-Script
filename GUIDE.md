@@ -75,7 +75,7 @@ available mission option, and Main Assist. The script also provides:
 - **Stop after current dungeon** (`/ldon finish`) and the scheduled stop finish
   the dungeon in progress, return to camp, then stop. Settings are saved per
   character in the MacroQuest config folder.
-- **Long-Duration Buffs** (Triune plugin by Triune): when enabled, the runner
+- **Long-Duration Buffs** (Triune plugin by DeFluxStudios): when enabled, the runner
   sends `/ac longbuff on` as combat starts. Build the roster in Triune first.
 - **Swarm Pull** (plugin by matth, optional, off by default): when enabled, the
   runner starts `/ac swarm start` inside dungeons and stops it when the task

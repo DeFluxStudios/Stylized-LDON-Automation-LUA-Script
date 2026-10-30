@@ -71,7 +71,7 @@ previews.
 - **DeFluxStudios** — MacroQuest Lua runner implementation, including the
   campaign scheduler, Triune AutoCombat integration, configuration UI, and
   navigation recovery behavior.
-- **Triune** — author of the Long-Duration Buffs plugin
+- **DeFluxStudios** — also the author of the Long-Duration Buffs plugin
   (`long_buffs.lua`, `tac_long_buffs_store.lua`) that the runner can optionally
   enable. **matth** — author of the Swarm Pull plugin the runner can optionally
   start. **RedGuides** — author of MQ2AdvPath, optionally used for recorded

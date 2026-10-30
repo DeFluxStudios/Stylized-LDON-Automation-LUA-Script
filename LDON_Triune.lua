@@ -10,7 +10,7 @@
 --
 -- Optional Triune plugin integrations (each is off unless enabled in the window):
 --   * Long-Duration Buffs (lua/tac/long_buffs.lua, tac_long_buffs_store.lua)
---     by Triune. The runner only sends /ac longbuff on and reads the roster file.
+--     by DeFluxStudios. The runner only sends /ac longbuff on and reads the roster file.
 --   * Swarm Pull (lua/tac/Swarm_Pull_v2.0.lua) by matth, a Lua port of pull.mac.
 --     The runner only sends /ac swarm start|stop; the plugin does the pulling.
 --   * MQ2AdvPath (RedGuides) for optional recorded-route playback via /play and /record.
@@ -19,7 +19,7 @@
 local mq = require('mq')
 local ImGui = require('ImGui')
 
-local VERSION = '1.4.4'
+local VERSION = '1.4.5'
 
 -- Hub, zone-line, and dungeon metadata used by the travel state machine.
 local HUBS = {
@@ -1577,11 +1577,12 @@ local function enterTask(_, dialogue)
             entrance = { zone = 'lfaydark', switch = 7, path = {'gfaydark', 'lfaydark'} }
         end
     elseif homeHubZone == 30 then
-        if text:find('hushed banquet', 1, true) or text:find('heart of the menagerie', 1, true) then
-            entrance = { zone = 'everfrost', switch = 0 }
-        else
-            entrance = { zone = 'everfrost', switch = 0 }
-        end
+        -- The Miragul's Menagerie entrance is a portal, not a door; the nearest door is a wall switch.
+        -- Locations are /loc order (Y, X, Z).
+        entrance = {
+            zone = 'everfrost', switch = 0, portal = true,
+            waypoints = { { -974.81, -5435.43, 153.51 }, { -829.68, -5459.88, 192.99 } },
+        }
     end
 
     if not entrance then
@@ -1598,12 +1599,61 @@ local function enterTask(_, dialogue)
         return false
     end
     if entrance.waypoints then
-        for _, point in ipairs(entrance.waypoints) do
+        for index, point in ipairs(entrance.waypoints) do
             if not navToLocation(point[1], point[2], point[3], 3, 60) then
-                echo('Could not reach the entrance approach point.')
-                return false
+                local lastPoint = entrance.portal and index == #entrance.waypoints
+                if not lastPoint then
+                    echo('Could not reach the entrance approach point.')
+                    return false
+                end
+                -- The portal sits off the mesh; walk the last few steps directly.
+                echo('Navmesh stopped short of the portal; walking straight in.')
+                mq.cmd('/nav stop')
+                mq.cmdf('/moveto loc %.2f %.2f', point[1], point[2])
+                mq.delay(6000)
+                mq.cmd('/moveto off')
             end
         end
+    end
+    if entrance.portal then
+        local before = zoneId()
+        -- Walking in does not trigger this portal, so click the nearest door object instead.
+        local function nearestDoor()
+            mq.cmd('/doortarget')
+            mq.delay(300)
+            local id = tonumber(mq.TLO.DoorTarget.ID()) or 0
+            local distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
+            return id, distance, tostring(mq.TLO.DoorTarget.Name() or '?')
+        end
+        local doorId, distance, doorName = nearestDoor()
+        echo(string.format('Portal check: nearest door %s (id %d) is %.0f units away.', doorName, doorId, distance))
+        if doorId ~= 0 and distance > 15 and distance <= 40 then
+            local doorY = tonumber(mq.TLO.DoorTarget.Y())
+            local doorX = tonumber(mq.TLO.DoorTarget.X())
+            if doorY and doorX then
+                mq.cmdf('/moveto loc %.2f %.2f', doorY, doorX)
+                for _ = 1, 24 do
+                    mq.delay(250)
+                    mq.cmdf('/doortarget id %d', doorId)
+                    distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
+                    if distance <= 10 then break end
+                end
+                mq.cmd('/moveto off')
+            end
+        end
+        if doorId ~= 0 and distance <= 15 then
+            mq.cmdf('/doortarget id %d', doorId)
+            mq.cmd('/face fast door')
+            mq.delay(300)
+            mq.cmd('/click left door')
+            if waitForZoneChange(before, 15) then return true end
+        elseif waitForZoneChange(before, 5) then
+            return true
+        end
+        echo(string.format('Standing at %.2f, %.2f, %.2f; nearest door %s (id %d) at %.0f units. Send this to the developer.',
+            tonumber(mq.TLO.Me.Y()) or 0, tonumber(mq.TLO.Me.X()) or 0, tonumber(mq.TLO.Me.Z()) or 0,
+            doorName, doorId, distance))
+        return false
     end
     if clickSwitch(entrance.switch) then return true end
     if zoneShortName() ~= entrance.zone then return false end
@@ -2436,7 +2486,7 @@ local function drawUI()
             if ImGui.IsItemHovered() then ImGui.SetTooltip('Finish the current dungeon once this many minutes have passed, then stop. 0 means never.') end
             ImGui.Separator()
             ImGui.TextColored(0.95, 0.78, 0.38, 1.0, 'Advanced (optional plugins)')
-            useLongBuffs = ImGui.Checkbox('Long-Duration Buffs (Triune plugin by Triune)', useLongBuffs)
+            useLongBuffs = ImGui.Checkbox('Long-Duration Buffs (Triune plugin by DeFluxStudios)', useLongBuffs)
             if longBuffsInstalled() then
                 ImGui.TextColored(0.45, 0.9, 0.55, 1.0, 'Installed. Recommended: on. Build the roster once in Triune Settings > Plugins.')
             else
@@ -2765,6 +2815,8 @@ while not shuttingDown do
             if not DUNGEONS[zone] then
                 meshRecoveryRequested = false
                 swarmActive = false
+                combatZone = 0
+                combatRunSends = 0
             elseif stats.dungeonStartedAt == 0 then
                 stats.dungeonStartedAt = os.time()
                 stuckProgress = ''
