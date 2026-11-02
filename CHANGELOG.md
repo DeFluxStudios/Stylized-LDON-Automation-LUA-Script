@@ -13,6 +13,28 @@ published. The initial public package is v1.3.2.
 
 ## [1.4.5] - 2026-10-29
 
+- Correct a regression in the 2026-11-01 changes: Start could open the
+  Adventure Request window and call `mq.delay` inside the ImGui callback.
+  Start/resume now queues startup on the main Lua loop, where delays can yield
+  safely. Pause, stop, exit and window close cancel pending startup. Added
+  callback-context and coroutine-yield regressions. A native MQ2Lua crash was
+  reported on Start; this unsafe path is fixed but still needs in-client retest.
+- Additional fixes (2026-11-01): show Random, Single Boss, Mob count,
+  Collection and Rescue on first launch, using the local client UI order.
+  Validate the selected index and label against the live recruiter list
+  before requesting; unreadable, empty or mismatched lists send no request.
+- Route Everfrost "snowy mine" directions through approach
+  `2697.71, -4686.63, -87.75` and entrance `2774.88, -4723.56, -93.31`
+  (Y, X, Z), then target a nearby door and verify click range and zoning.
+  Keep the portal route separate; unknown directions report an error rather
+  than guessing. The snowy-mine route still needs in-game validation.
+- Fix starting another campaign with a stale previous camp, including North
+  Ro: reconcile the hub on fresh start, preserve unfinished-adventure ownership,
+  update the hub even when already at the target, and use Magus travel for
+  cross-camp returns rather than transition-zone crossings. Preserve paused
+  campaign state and completed-leg return ordering.
+- Add Lua 5.1/LuaJIT regression checks for mission requests, both Everfrost
+  routes, click safety and campaign restarts using mocked MQ interactions.
 - Fix the Everfrost Peaks entrance (Miragul's Menagerie). The runner targeted
   the nearest door, a wall switch (EFWALL1) it could not reach, instead of the
   glimmering portal. It now walks to two recorded points, then targets and

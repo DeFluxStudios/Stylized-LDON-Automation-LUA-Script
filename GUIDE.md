@@ -13,11 +13,22 @@ configuration, route, or navmesh will behave identically.
 
 - Configure sequential campaign legs in the in-game window, up to five camps.
 - Choose a dungeon count for each leg, including skipping a leg.
-- Choose the mission request option for a leg. This release currently exposes
-  the mob-count option; additional mission categories are not currently
-  exposed by the UI.
+- Choose the mission request option for a leg. Random, Single Boss, Mob count,
+  Collection and Rescue are available before the first run. Before requesting,
+  the runner reads the live game list and checks the chosen index and label.
+  An empty, unreadable or changed list does not send a request. Use **Refresh
+  task types** with the Adventure Request window open to refresh manually.
 - The default is hard difficulty and mob-count mission selection.
 - Campaign scheduling advances through configured legs as tasks complete.
+- After a campaign finishes, you can select different camps and start again
+  without unloading the script. A new campaign uses its first selected camp;
+  an unfinished adventure retains its own camp. Pausing and resuming preserves
+  the campaign's counters and current camp.
+- Start/resume queues initialization on the main Lua loop, not the ImGui
+  drawing callback. Opening the Adventure Request window can briefly delay
+  startup. Pause, stop, exit or closing the runner cancels pending startup.
+- Selecting a mission type does not add objective-specific automation.
+  Collection and Rescue objectives may require manual assistance.
 
 ### Travel and mission flow
 
@@ -31,10 +42,24 @@ configuration, route, or navmesh will behave identically.
 - The solo Bazaar-and-Back return path requires AA 331.
 - When a Bazaar return is used, Magus Alaria is recognized; the existing East
   Commonlands Magus route remains available when the ability returns there.
+- Everfrost entrance directions select separate routes. **Snowy mine** uses
+  approach `2697.71, -4686.63, -87.75`, then entrance
+  `2774.88, -4723.56, -93.31` (Y, X, Z). Portal directions retain the separate
+  portal approach. Unrecognized Everfrost directions stop the entrance attempt
+  and are printed to the log instead of guessing. The mine targets a nearby
+  door and uses the existing click-range and zoning checks.
 
 Travel depends on server zone IDs, NPC names, abilities, navmeshes, and
 MacroQuest plugins being suitable for the character and server. Some routes
 may require manual assistance.
+
+### Regression checks
+
+From the repository root, run `lua tests\regression.lua` with Lua 5.1, or
+`luajit tests\regression.lua`. The suite compiles the full script and tests
+its mission selection, entrance routing and campaign restart logic using
+mocked MacroQuest interactions. It does not replace in-game testing of
+navigation, door identity or server behavior.
 
 ### Triune AutoCombat
 

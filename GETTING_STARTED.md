@@ -101,8 +101,15 @@ Useful commands:
 | `/ldon ma <character name>` | Set the Main Assist / puller |
 | `/ldon type <option>` | Set a mission request option |
 
-Use the in-game dropdown when available to choose a mission type. The current
-release is configured for hard mob-count missions by default.
+All five mission types are available in the runner dropdown on first launch:
+Random, Single Boss, Mob count, Collection and Rescue. Hard mob-count missions
+remain the default. Before requesting, the runner checks the chosen type
+against the live recruiter list and does not request if it cannot verify it.
+Collection and Rescue objectives may need manual assistance.
+
+When a campaign finishes, choose the next camps and press **Start campaign**;
+you do not need to restart the Lua. An unfinished adventure keeps its owning
+camp when starting or resuming.
 
 ## If it does not start
 

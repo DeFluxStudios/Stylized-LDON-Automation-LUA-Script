@@ -11,8 +11,9 @@ Triune AutoCombat integration.
 
 - Requests hard-difficulty mob-count missions by default.
 - Provides an in-game window to set campaign camps, dungeon counts, available
-  mission request options, and the Main Assist. This release currently
-  exposes the mob-count option.
+  mission request options, and the Main Assist. Random, Single Boss, Mob count,
+  Collection and Rescue are available immediately; requests are checked
+  against the recruiter's live list.
 - Supports solo runs and grouped runs started by the group leader.
 - Configures the selected Main Assist as **Puller - Hunt** and other group
   members as **Assist - Chase** through Triune AutoCombat.

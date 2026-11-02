@@ -135,7 +135,11 @@ local ENTRY_ZONES = {
 
 -- Campaign defaults and the server's unlocked camp progression.
 local missionOptions = {
-    { label = 'Mob count (Slay / Kill / Ridding)', index = 3 },
+    { label = 'Random', index = 1 },
+    { label = 'Single Boss', index = 2 },
+    { label = 'Mob count', index = 3 },
+    { label = 'Collection', index = 4 },
+    { label = 'Rescue', index = 5 },
 }
 local missionTypeIndex = 3
 local CAMPAIGN_COUNTS = { 0 }
@@ -155,6 +159,7 @@ local CAMP_DISPLAY = {
 }
 local mainAssistName = tostring(mq.TLO.Me.CleanName() or '')
 local active = false
+local runnerStartPending = false
 local shuttingDown = false
 local hardMode = true
 local lastNotice = ''
@@ -373,7 +378,7 @@ end
 
 local ASSIGNMENT_CAMP_KEYWORDS = {
     { 'deepest guk', 393 }, { 'takish', 392 }, { 'rujarkian', 408 },
-    { 'mistmoore', 68 }, { 'miragul', 30 },
+    { 'mistmoore', 68 }, { 'miragul', 30 }, { 'everfrost', 30 },
 }
 
 local function hubFromAssignment(dialogue)
@@ -913,14 +918,14 @@ local function refreshMissionOptions()
     local choices = {}
     if not mq.TLO.Window('AdventureRequestWnd').Open() then
         echo('Open the LDoN request window first to refresh the mission type dropdown.')
-        return
+        return false
     end
     local combo = mq.TLO.Window('AdventureRequestWnd').Child('AdvRqst_TypeCombobox')
     for index = 1, 10 do
         local ok, value = pcall(function() return combo.List(index)() end)
         if not ok then
-            echo('Could not read the game mission-type list; retaining the verified mob-count option.')
-            break
+            echo('Could not read the game mission-type list; retaining the previous choices. No task will be requested.')
+            return false
         end
         if value == nil or tostring(value) == '' then break end
         local label = tostring(value)
@@ -932,14 +937,12 @@ local function refreshMissionOptions()
             choices[#choices + 1] = { label = label, index = index }
         end
     end
-    local mobCountFound = false
-    for _, choice in ipairs(choices) do
-        if choice.index == 3 then mobCountFound = true; break end
-    end
-    if not mobCountFound then
-        choices[#choices + 1] = { label = 'Mob count (Slay / Kill / Ridding)', index = 3 }
+    if #choices == 0 then
+        echo('The game mission-type list is empty; retaining the previous choices. No task will be requested.')
+        return false
     end
     missionOptions = choices
+    return true
 end
 
 local function validateController(mainAssist)
@@ -1197,9 +1200,26 @@ local function requestTask(hub, requestedMissionType)
         echo('Adventure Request window did not open. No task was requested.')
         return false
     end
-    refreshMissionOptions()
-    missionTypeIndex = requestedMissionType or missionTypeIndex
+    local requested = requestedMissionType or missionTypeIndex
+    local requestedLabel
+    for _, choice in ipairs(missionOptions) do
+        if choice.index == requested then requestedLabel = choice.label; break end
+    end
     mq.delay(3000)
+    if not refreshMissionOptions() then return false end
+    local available = false
+    for _, choice in ipairs(missionOptions) do
+        if choice.index == requested and requestedLabel
+            and choice.label:lower() == requestedLabel:lower() then
+            available = true
+            break
+        end
+    end
+    if not available then
+        echo('The selected mission type (' .. tostring(requested) .. ') is not available at this recruiter. No task was requested.')
+        return false
+    end
+    missionTypeIndex = requested
     mq.cmdf('/notify AdventureRequestWnd AdvRqst_RiskCombobox listselect %d', hardMode and 2 or 1)
     mq.cmdf('/notify AdventureRequestWnd AdvRqst_TypeCombobox listselect %d', missionTypeIndex)
     mq.delay(500)
@@ -1425,12 +1445,15 @@ local MAGUS_DESTINATIONS = {
 }
 
 local function travelToCamp(targetHubZone)
-    if zoneId() == targetHubZone then return true end
     local hub = HUBS[targetHubZone]
     local destination = MAGUS_DESTINATIONS[targetHubZone]
     if not hub or not destination then
         echo('No Magus destination is configured for the selected camp.')
         return false
+    end
+    if zoneId() == targetHubZone then
+        homeHubZone = targetHubZone
+        return true
     end
     echo('Switching camp to ' .. hub.name .. ' via Magus destination "' .. destination .. '".')
     if not useMagus(destination, MAGUS_NAMES_BY_ZONE[zoneId()]) then
@@ -1577,12 +1600,21 @@ local function enterTask(_, dialogue)
             entrance = { zone = 'lfaydark', switch = 7, path = {'gfaydark', 'lfaydark'} }
         end
     elseif homeHubZone == 30 then
-        -- The Miragul's Menagerie entrance is a portal, not a door; the nearest door is a wall switch.
-        -- Locations are /loc order (Y, X, Z).
-        entrance = {
-            zone = 'everfrost', switch = 0, portal = true,
-            waypoints = { { -974.81, -5435.43, 153.51 }, { -829.68, -5459.88, 192.99 } },
-        }
+        -- Locations are /loc order (Y, X, Z). Everfrost has two distinct entrances.
+        if text:find('snowy mine', 1, true) then
+            entrance = {
+                zone = 'everfrost', switch = 0, mine = true,
+                waypoints = { { 2697.71, -4686.63, -87.75 }, { 2774.88, -4723.56, -93.31 } },
+            }
+        elseif text:find('portal', 1, true) then
+            entrance = {
+                zone = 'everfrost', switch = 0, portal = true,
+                waypoints = { { -974.81, -5435.43, 153.51 }, { -829.68, -5459.88, 192.99 } },
+            }
+        else
+            echo('Unrecognized Everfrost entrance directions; not choosing an entrance: ' .. dialogue)
+            return false
+        end
     end
 
     if not entrance then
@@ -1600,7 +1632,8 @@ local function enterTask(_, dialogue)
     end
     if entrance.waypoints then
         for index, point in ipairs(entrance.waypoints) do
-            if not navToLocation(point[1], point[2], point[3], 3, 60) then
+            local arrival = entrance.mine and index == #entrance.waypoints and 10 or 3
+            if not navToLocation(point[1], point[2], point[3], arrival, 60) then
                 local lastPoint = entrance.portal and index == #entrance.waypoints
                 if not lastPoint then
                     echo('Could not reach the entrance approach point.')
@@ -1614,6 +1647,19 @@ local function enterTask(_, dialogue)
                 mq.cmd('/moveto off')
             end
         end
+    end
+    if entrance.mine then
+        mq.cmd('/doortarget')
+        mq.delay(300)
+        local doorId = tonumber(mq.TLO.DoorTarget.ID()) or 0
+        local distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
+        if doorId == 0 or distance > 40 then
+            echo(string.format('No nearby snowy-mine entrance door at the recorded location (id %d, distance %.0f).', doorId, distance))
+            return false
+        end
+        echo(string.format('Snowy mine: targeting %s (id %d), %.0f units away.',
+            tostring(mq.TLO.DoorTarget.Name() or '?'), doorId, distance))
+        entrance.switch = doorId
     end
     if entrance.portal then
         local before = zoneId()
@@ -1928,11 +1974,34 @@ local function beginCampaign()
             echo('Select at least one camp with a nonzero dungeon count before starting.')
             return false
         end
+        local assigned, completed, dialogue = assignmentState()
+        local assignmentHub = assigned and not completed and hubFromAssignment(dialogue) or nil
+        if assigned and not completed and not assignmentHub then
+            if DUNGEONS[zoneId()] then
+                selectHomeHub()
+                assignmentHub = homeHubZone ~= 0 and homeHubZone or nil
+            end
+            if not assignmentHub then
+                echo('Could not determine the camp for the active adventure. Open its directions before starting.')
+                return false
+            end
+        end
+        local startHub = assignmentHub or campaignPlan[first].hubZone
+        local returnBeforeCampChange = false
+        local currentZone = zoneId()
+        if not assignmentHub and ENTRY_ZONES[currentZone] and not HUBS[currentZone] then
+            selectHomeHub()
+            if homeHubZone ~= 0 then
+                returnBeforeCampChange = homeHubZone ~= startHub
+                startHub = homeHubZone
+            end
+        end
+        homeHubZone = startHub
         campaignLegIndex = first
         campaignCompleted = {}
         for index = 1, #campaignPlan do campaignCompleted[index] = 0 end
         campaignTaskCounted = false
-        campaignTravelPending = false
+        campaignTravelPending = returnBeforeCampChange
         campaignStopPending = false
         campaignInitialized = true
         stats.startedAt = 0
@@ -1963,6 +2032,16 @@ local function startRunner()
         return false
     end
     if not validateTravelSetup() then return false end
+    if not campaignInitialized then
+        if not mq.TLO.Window('AdventureRequestWnd').Open() then
+            mq.cmd('/windowstate AdventureRequestWnd open')
+            mq.delay(500)
+        end
+        if not mq.TLO.Window('AdventureRequestWnd').Open() then
+            echo('Adventure Request window did not open; cannot check for an existing adventure.')
+            return false
+        end
+    end
     if not beginCampaign() then return false end
     local zone = zoneId()
     if not HUBS[zone] and not ENTRY_ZONES[zone] and not DUNGEONS[zone] then
@@ -2393,6 +2472,7 @@ local function drawUI()
     uiOpen = open
     if not open then
         active = false
+        runnerStartPending = false
         shuttingDown = true
         mq.cmd('/nav stop')
     end
@@ -2403,11 +2483,12 @@ local function drawUI()
         if ImGui.Button(active and 'Pause task runner' or 'Start campaign') then
             if active then
                 active = false
+                runnerStartPending = false
                 mq.cmd('/nav stop')
                 stopSwarmPull(false)
                 saveSettings()
             else
-                startRunner()
+                runnerStartPending = true
             end
         end
         ImGui.SameLine()
@@ -2677,9 +2758,10 @@ local function command(...)
     if action == 'meshfail' then
         onMeshFailure(args[2], args[3], args[4], args[5])
     elseif action == 'start' or action == 'resume' then
-        if startRunner() then echo('Task runner resumed.') end
+        runnerStartPending = true
     elseif action == 'pause' or action == 'stop' then
         active = false
+        runnerStartPending = false
         mq.cmd('/nav stop')
         if useAdvPath and advPathLoaded() then mq.cmd('/play off') end
         stopSwarmPull(false)
@@ -2738,6 +2820,7 @@ local function command(...)
         end
     elseif action == 'exit' then
         active = false
+        runnerStartPending = false
         shuttingDown = true
         mq.cmd('/nav stop')
         stopSwarmPull(false)
@@ -2807,6 +2890,11 @@ echo('LDoN Triune Runner v' .. VERSION .. ' loaded; Leg 1 defaults to one hard m
 -- Main campaign loop: recover, fight, exit, return, change camps, and request.
 while not shuttingDown do
     mq.doevents()
+    -- Window initialization can yield; never run it from an ImGui or command callback.
+    if runnerStartPending and not shuttingDown then
+        runnerStartPending = false
+        if startRunner() then echo('Task runner started or resumed.') end
+    end
     if active then
         local zone = zoneId()
         if zone ~= lastZone then
@@ -2905,7 +2993,7 @@ while not shuttingDown do
             elseif homeHubZone ~= 0 and zone ~= homeHubZone then
                 if not travelReady and not configureGroupTravel() then
                     active = false
-                elseif returnToHub() then
+                elseif (HUBS[zone] and travelToCamp(homeHubZone)) or (not HUBS[zone] and returnToHub()) then
                     lastNotice = ''
                     failureStreak = 0
                 else
