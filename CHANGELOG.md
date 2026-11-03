@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to the LDoN Triune Runner are documented here. The script
-currently reports version **1.4.5**.
+currently reports version **1.4.6**.
 
 ## Version history note
 
@@ -10,6 +10,48 @@ release records. The entries before v1.3.2 below are therefore a retrospective
 feature ledger reconstructed from the current script and the available project
 history; they are not claims that matching releases or tags were previously
 published. The initial public package is v1.3.2.
+
+## [1.4.6] - 2026-11-02
+
+- Set final snowy-mine waypoint height to -104 at the user's request.
+  Entry succeeded in game, though movement remains rough.
+- If the final snowy-mine navmesh approach stops within 35 units, allow a
+  10-second MoveUtils walk, requiring verified 3D arrival within 10 units
+  before targeting the entrance. Stop walking on pause or zoning.
+- Replace snowy-mine approach points with the user's latest screenshot:
+  `2697.18, -4694.15, -91.06`, then `2771.57, -4725.96, -104` (Y, X, Z).
+  Preserve the existing arrival tolerances and entrance-door safety checks.
+- Add an opt-in, saved shrink-on-dungeon-entry option before TAC combat starts.
+  Each box checks its own ready carried shrink clicky, including regular and
+  tiered versions of the three supported items. Attempts one click per entry;
+  reports failures and continues. Requires ldon_shrink.lua on each box and
+  BoxNet slash-command acceptance for remote boxes. Live shrink testing pending.
+- Check final crypt waypoint arrival in Y/X only, retaining navigation Z=0.
+  Standing on the building floor no longer fails arrival solely due to height.
+  The 3-unit horizontal arrival limit and door-click safety checks remain.
+- Update the crypt approach from the user's latest screenshots: navigate through
+  `-739.37, 3793.22, 1.06` then `-760.27, 3838.85, 0` (Y, X, Z), and target
+  `MISTFCFN700` by name before clicking. Leave the grave route unchanged.
+  The second point uses Z=0 because the navmesh runs beneath the building.
+  Crypt approach and door click were confirmed working in game.
+- Grave retains test point `-67, 3843` (Y, X), without forced Z, followed by
+  nearby-door selection. Grave routing remains unverified. Remove the old
+  crypt crossing toward the grave and its assumed heading.
+- Cross-check entrance routes against the supplied `LDON.mac` by Cannonballdex:
+  add North Ro quicksand and South Ro Rujark cave approaches, target
+  `OBJ_ZONEBOX`, `GKPORTAL701` and `MIRPORTAL700` by name rather
+  than hardcoded or nearest switch IDs, and add the Guktop approach point.
+- Replace Mistmoore fixed switch IDs with location-based nearby entrance
+  targeting. Unknown Guk/Mistmoore directions now report an
+  error rather than choosing an arbitrary entrance.
+- Retain the user's Triune tree-trunk, snowy-mine and portal coordinates and
+  existing recorded zone-line crossings. Return-to-hub coordinates/headings
+  agree with the macro. Normalize North/South Ro and Commonlands route aliases.
+- Detect zoning during entrance navigation or recorded playback before
+  clicking; reject unrelated destinations. Preserve existing named entrance
+  recording keys. The added approaches and named doors still need in-game
+  validation on Triune except for the confirmed crypt and snowy-mine entries.
+- Validation: 76 mocked LuaJIT regressions pass; full script syntax checked.
 
 ## [1.4.5] - 2026-10-29
 

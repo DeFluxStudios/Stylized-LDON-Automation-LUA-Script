@@ -19,7 +19,7 @@ if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $stage 'artwork') | Out-Null
 
-foreach ($file in 'LDON_Triune.lua', 'README.md', 'GETTING_STARTED.md', 'GUIDE.md', 'CHANGELOG.md') {
+foreach ($file in 'LDON_Triune.lua', 'ldon_shrink.lua', 'README.md', 'GETTING_STARTED.md', 'GUIDE.md', 'CHANGELOG.md') {
     Copy-Item (Join-Path $root $file) $stage
 }
 Copy-Item (Join-Path $root 'artwork\ldon-triune-banner.svg') (Join-Path $stage 'artwork')

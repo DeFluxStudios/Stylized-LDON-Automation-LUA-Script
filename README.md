@@ -5,7 +5,7 @@ Triune AutoCombat integration.
 
 ![LDoN Triune Runner artwork](artwork/ldon-triune-banner.svg)
 
-**Current release: v1.3.2**
+**Current release: v1.4.6**
 
 ## What it does
 
@@ -40,7 +40,9 @@ Dependencies and navmeshes are **not included** in the release archives.
 
 ## Quick start
 
-1. Copy `LDON_Triune.lua` into MacroQuest's `lua` folder.
+1. Copy `LDON_Triune.lua` into MacroQuest's `lua` folder. For optional shrink
+   before TAC, also copy `ldon_shrink.lua` there on every box; regular and
+   tiered shrink items are supported. See the guide for BoxNet requirements.
 2. Start from a supported LDoN hub or an LDoN instance.
 3. Run `/lua run LDON_Triune` in the MacroQuest console.
 4. Configure the campaign and Main Assist in the runner window, then start.
@@ -66,6 +68,10 @@ previews.
 
 ## Credits and attributions
 
+- **Cannonballdex and the contributors credited in LDON.mac**: additional
+  entrance coordinates, named doors and the Mistmoore crypt crossing were
+  cross-checked against the user-supplied macro. Triune-specific routes remain
+  where they differ; the macro itself is not bundled.
 - **Cyfer** — LDoN mission and travel reference details adapted from the
   user-provided `LDON.lua`. The original reference material is not included in
   this repository.

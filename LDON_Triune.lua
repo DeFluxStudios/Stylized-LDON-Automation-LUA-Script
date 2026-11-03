@@ -7,6 +7,8 @@
 -- mission-request flow, and dungeon entrance/exit routing were reorganized for
 -- MacroQuest Lua. The campaign scheduler, Triune integration, UI, and recovery
 -- behavior are additions to this runner.
+-- Additional entrance coordinates, door names and crypt crossing details were
+-- cross-checked against LDON.mac by Cannonballdex and its credited contributors.
 --
 -- Optional Triune plugin integrations (each is off unless enabled in the window):
 --   * Long-Duration Buffs (lua/tac/long_buffs.lua, tac_long_buffs_store.lua)
@@ -19,7 +21,7 @@
 local mq = require('mq')
 local ImGui = require('ImGui')
 
-local VERSION = '1.4.5'
+local VERSION = '1.4.6'
 
 -- Hub, zone-line, and dungeon metadata used by the travel state machine.
 local HUBS = {
@@ -198,6 +200,8 @@ local campaignTravelPending = false
 local campaignStopPending = false
 local campaignInitialized = false
 local useLongBuffs = false
+local shrinkOnEntry = false
+local shrinkAttemptZone = 0
 local useAdvPath = false
 local advPathFirst = false
 local useSwarmPull = false
@@ -311,6 +315,9 @@ end
 
 local function zoneShortName()
     local shortName = tostring(mq.TLO.Zone.ShortName() or ''):lower()
+    if shortName == 'northro' then return 'nro' end
+    if shortName == 'southro' then return 'sro' end
+    if shortName == 'commonlands' or shortName == 'ecommons' then return 'commons' end
     if shortName == 'butcherblock' then return 'butcher' end
     if shortName == 'greaterfaydark' then return 'gfaydark' end
     if shortName == 'lesserfaydark' then return 'lfaydark' end
@@ -405,6 +412,7 @@ local function saveSettings()
         string.format('    autoStandInCombat = %s,', tostring(autoStandInCombat)),
         string.format('    campaignLoop = %s,', tostring(campaignLoop)),
         string.format('    useLongBuffs = %s,', tostring(useLongBuffs)),
+        string.format('    shrinkOnEntry = %s,', tostring(shrinkOnEntry)),
         string.format('    useAdvPath = %s,', tostring(useAdvPath)),
         string.format('    advPathFirst = %s,', tostring(advPathFirst)),
         string.format('    useSwarmPull = %s,', tostring(useSwarmPull)),
@@ -443,6 +451,7 @@ local function loadSettings()
     if type(saved.autoStandInCombat) == 'boolean' then autoStandInCombat = saved.autoStandInCombat end
     if type(saved.campaignLoop) == 'boolean' then campaignLoop = saved.campaignLoop end
     if type(saved.useLongBuffs) == 'boolean' then useLongBuffs = saved.useLongBuffs end
+    if type(saved.shrinkOnEntry) == 'boolean' then shrinkOnEntry = saved.shrinkOnEntry end
     if type(saved.useAdvPath) == 'boolean' then useAdvPath = saved.useAdvPath end
     if type(saved.advPathFirst) == 'boolean' then advPathFirst = saved.advPathFirst end
     if type(saved.useSwarmPull) == 'boolean' then useSwarmPull = saved.useSwarmPull end
@@ -543,7 +552,7 @@ local function waitForZoneChange(previousZone, timeoutSeconds)
     return false
 end
 
-local function navToLocation(y, x, z, arrivalDistance, timeoutSeconds)
+local function navToLocation(y, x, z, arrivalDistance, timeoutSeconds, ignoreArrivalZ)
     local startY = tonumber(mq.TLO.Me.Y()) or 0
     local startX = tonumber(mq.TLO.Me.X()) or 0
     local startZ = tonumber(mq.TLO.Me.Z()) or 0
@@ -552,7 +561,7 @@ local function navToLocation(y, x, z, arrivalDistance, timeoutSeconds)
         local currentY = tonumber(mq.TLO.Me.Y()) or startY
         local currentX = tonumber(mq.TLO.Me.X()) or startX
         local currentZ = tonumber(mq.TLO.Me.Z()) or startZ
-        if z then
+        if z and not ignoreArrivalZ then
             local distance = math.sqrt((currentY - y) ^ 2 + (currentX - x) ^ 2 + (currentZ - z) ^ 2)
             return distance <= arrivalRange
         end
@@ -570,7 +579,7 @@ local function navToLocation(y, x, z, arrivalDistance, timeoutSeconds)
         local endX = tonumber(mq.TLO.Me.X()) or startX
         local endZ = tonumber(mq.TLO.Me.Z()) or startZ
         local distance
-        if z then
+        if z and not ignoreArrivalZ then
             distance = math.sqrt((endY - y) ^ 2 + (endX - x) ^ 2 + (endZ - z) ^ 2)
         else
             distance = math.sqrt((endY - y) ^ 2 + (endX - x) ^ 2)
@@ -980,11 +989,46 @@ local function configureGroupTravel()
     return true
 end
 
+local function shrinkGroupOnEntry()
+    local zone = zoneId()
+    if not shrinkOnEntry or shrinkAttemptZone == zone then return active end
+    shrinkAttemptZone = zone
+    if not luaFileExists('ldon_shrink.lua') then
+        echo('Shrink helper ldon_shrink.lua is missing; continuing without shrink.')
+        return active
+    end
+    local ok, shrink = pcall(require, 'ldon_shrink')
+    if not ok then
+        echo('Could not load shrink helper: ' .. tostring(shrink) .. '. Continuing without shrink.')
+        return active
+    end
+    local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
+    mq.cmd('/ac pause')
+    local expectedZone = tonumber(mq.TLO.Zone.ID())
+    local started = mq.gettime()
+    if grouped then
+        mq.cmd('/ac net group pause')
+        mq.cmdf('/ac net group /lua run ldon_shrink %d', expectedZone)
+        echo('Shrink sent to group boxes; BoxNet and slash-command acceptance are required on each box. Remote completion is not confirmed by this runner.')
+    end
+    shrink(expectedZone, function() return active and zoneId() == zone end)
+    if grouped then
+        -- Remote helpers allow 15 seconds for zoning and 10 for the click.
+        while active and zoneId() == zone and mq.gettime() - started < 27000 do
+            mq.doevents()
+            mq.delay(250)
+        end
+    end
+    return active and zoneId() == zone
+end
+
 local function configureGroupCombat()
     local me = tostring(mq.TLO.Me.CleanName() or '')
     local selected = mainAssistName ~= '' and mainAssistName or me
     if not validateController(selected) then return false end
     if not ensureTriune() then return false end
+    local _, completed = assignmentState()
+    if not completed and not shrinkGroupOnEntry() then return false end
 
     mq.cmd('/ac ma ' .. selected)
     local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
@@ -1469,21 +1513,25 @@ local function travelToCamp(targetHubZone)
     return true
 end
 
-local function clickSwitch(switchId)
+local function clickSwitch(switchId, doorName)
     local before = zoneId()
-    if switchId and switchId > 0 then
+    if doorName then
+        mq.cmd('/doortarget ' .. doorName)
+    elseif switchId and switchId > 0 then
         mq.cmdf('/doortarget id %d', switchId)
     else
         mq.cmd('/doortarget')
     end
     for _ = 1, 20 do
         local targetId = tonumber(mq.TLO.DoorTarget.ID()) or 0
-        if targetId ~= 0 and (not switchId or switchId == 0 or targetId == switchId) then break end
+        local nameMatches = not doorName or tostring(mq.TLO.DoorTarget.Name() or ''):lower() == doorName:lower()
+        if targetId ~= 0 and nameMatches and (not switchId or switchId == 0 or targetId == switchId) then break end
         mq.delay(250)
     end
     local doorId = tonumber(mq.TLO.DoorTarget.ID()) or 0
-    if doorId == 0 or (switchId and switchId > 0 and doorId ~= switchId) then
-        echo('Could not target the expected LDoN entrance switch.')
+    if doorId == 0 or (switchId and switchId > 0 and doorId ~= switchId)
+        or (doorName and tostring(mq.TLO.DoorTarget.Name() or ''):lower() ~= doorName:lower()) then
+        echo('Could not target the expected LDoN entrance switch' .. (doorName and (' "' .. doorName .. '"') or '') .. '.')
         return false
     end
     local distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
@@ -1569,12 +1617,15 @@ local function enterTask(_, dialogue)
     local text = dialogue:lower()
     local entrance
     if homeHubZone == 392 then
-        entrance = { zone = 'nro', switch = 3 }
+        entrance = {
+            zone = 'nro', switch = 0, nearby = true, recordingKey = 'switch_nro_3',
+            waypoints = { { 5562.44, -1183.15, 25.01 } },
+        }
     elseif homeHubZone == 408 then
         if zoneId() == 408 and not useMagus('South Ro') then return false end
         entrance = {
-            zone = 'sro', approachSpawn = 'Scout_Miigle',
-            switch = 1,
+            zone = 'sro', switch = 0, door = 'OBJ_ZONEBOX', recordingKey = 'switch_sro_1',
+            waypoints = { { 5, -222, 129.58 } },
         }
     elseif homeHubZone == 393 then
         local function mentions(...)
@@ -1584,31 +1635,48 @@ local function enterTask(_, dialogue)
             return false
         end
         if mentions('barricaded door', 'guk portal', 'root garden') then
-            entrance = { zone = 'guktop', switch = 0, path = {'innothule', 'guktop'} }
+            entrance = {
+                zone = 'guktop', switch = 0, door = 'GKPORTAL701', path = {'innothule', 'guktop'},
+                waypoints = { { 441.77, 228.63, -9.13 } },
+            }
         elseif mentions('cauldron of lost souls', 'rotting tree trunk', 'tree trunk', 'innothule') then
             entrance = {
-                zone = 'innothule', switch = 0, path = {'innothule'},
+                zone = 'innothule', switch = 0, nearby = true, path = {'innothule'},
                 waypoints = { { 1389.12, 1145.40, -15.62 }, { 1245.50, 1186.58, -10.49 } },
             }
         else
-            entrance = { zone = 'guktop', switch = 0, path = {'innothule', 'guktop'} }
+            echo('Unrecognized Deepest Guk entrance directions; not choosing an entrance: ' .. dialogue)
+            return false
         end
     elseif homeHubZone == 68 then
-        if text:find('grave', 1, true) then
-            entrance = { zone = 'lfaydark', switch = 10, path = {'gfaydark', 'lfaydark'} }
+        if text:find('unearthed grave', 1, true) then
+            entrance = {
+                zone = 'lfaydark', switch = 0, nearby = true,
+                path = {'gfaydark', 'lfaydark'},
+                waypoints = { { -67, 3843 } },
+            }
+        elseif text:find('crypt', 1, true) then
+            entrance = {
+                zone = 'lfaydark', switch = 0, door = 'MISTFCFN700', path = {'gfaydark', 'lfaydark'},
+                waypoints = {
+                    { -739.37, 3793.22, 1.06 },
+                    { -760.27, 3838.85, 0, ignoreArrivalZ = true },
+                },
+            }
         else
-            entrance = { zone = 'lfaydark', switch = 7, path = {'gfaydark', 'lfaydark'} }
+            echo('Unrecognized Mistmoore entrance directions; not choosing an entrance: ' .. dialogue)
+            return false
         end
     elseif homeHubZone == 30 then
         -- Locations are /loc order (Y, X, Z). Everfrost has two distinct entrances.
         if text:find('snowy mine', 1, true) then
             entrance = {
-                zone = 'everfrost', switch = 0, mine = true,
-                waypoints = { { 2697.71, -4686.63, -87.75 }, { 2774.88, -4723.56, -93.31 } },
+                zone = 'everfrost', switch = 0, mine = true, nearby = true,
+                waypoints = { { 2697.18, -4694.15, -91.06 }, { 2771.57, -4725.96, -104 } },
             }
         elseif text:find('portal', 1, true) then
             entrance = {
-                zone = 'everfrost', switch = 0, portal = true,
+                zone = 'everfrost', switch = 0, portal = true, door = 'MIRPORTAL700',
                 waypoints = { { -974.81, -5435.43, 153.51 }, { -829.68, -5459.88, 192.99 } },
             }
         else
@@ -1632,79 +1700,77 @@ local function enterTask(_, dialogue)
     end
     if entrance.waypoints then
         for index, point in ipairs(entrance.waypoints) do
+            local before = zoneId()
             local arrival = entrance.mine and index == #entrance.waypoints and 10 or 3
-            if not navToLocation(point[1], point[2], point[3], arrival, 60) then
+            local reached = navToLocation(point[1], point[2], point[3], arrival, 60, point.ignoreArrivalZ)
+            if not reached and entrance.mine and index == #entrance.waypoints
+                and active and zoneId() == before
+                and distance3DTo(point[1], point[2], point[3]) <= 35
+                and mq.TLO.Plugin('MQ2MoveUtils').IsLoaded() == true then
+                echo('Navmesh stopped short of the snowy mine; walking the final approach for up to 10 seconds.')
+                mq.cmd('/nav stop')
+                mq.cmdf('/moveto loc %.2f %.2f', point[1], point[2])
+                for _ = 1, 40 do
+                    mq.doevents()
+                    if not active or zoneId() ~= before
+                        or distance3DTo(point[1], point[2], point[3]) <= arrival then break end
+                    mq.delay(250)
+                end
+                mq.cmd('/moveto off')
+                reached = active and distance3DTo(point[1], point[2], point[3]) <= arrival
+            end
+            if zoneId() ~= before then
+                local dungeon = DUNGEONS[zoneId()]
+                if dungeon and dungeon.family == HUBS[homeHubZone].family then return true end
+                echo('Entrance approach zoned into an unexpected zone; not clicking a door.')
+                return false
+            end
+            if not reached then
                 local lastPoint = entrance.portal and index == #entrance.waypoints
                 if not lastPoint then
                     echo('Could not reach the entrance approach point.')
                     return false
                 end
                 -- The portal sits off the mesh; walk the last few steps directly.
-                echo('Navmesh stopped short of the portal; walking straight in.')
+                echo('Navmesh stopped short of the portal; walking to the final approach.')
                 mq.cmd('/nav stop')
                 mq.cmdf('/moveto loc %.2f %.2f', point[1], point[2])
                 mq.delay(6000)
                 mq.cmd('/moveto off')
+                if zoneId() ~= before then
+                    local dungeon = DUNGEONS[zoneId()]
+                    if dungeon and dungeon.family == HUBS[homeHubZone].family then return true end
+                    echo('Portal approach zoned into an unexpected zone; not clicking a door.')
+                    return false
+                end
             end
         end
     end
-    if entrance.mine then
+    if entrance.nearby then
         mq.cmd('/doortarget')
         mq.delay(300)
         local doorId = tonumber(mq.TLO.DoorTarget.ID()) or 0
         local distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
         if doorId == 0 or distance > 40 then
-            echo(string.format('No nearby snowy-mine entrance door at the recorded location (id %d, distance %.0f).', doorId, distance))
+            echo(string.format('No nearby entrance door at the recorded location (id %d, distance %.0f).', doorId, distance))
             return false
         end
-        echo(string.format('Snowy mine: targeting %s (id %d), %.0f units away.',
+        echo(string.format('Entrance: targeting %s (id %d), %.0f units away.',
             tostring(mq.TLO.DoorTarget.Name() or '?'), doorId, distance))
         entrance.switch = doorId
     end
-    if entrance.portal then
-        local before = zoneId()
-        -- Walking in does not trigger this portal, so click the nearest door object instead.
-        local function nearestDoor()
-            mq.cmd('/doortarget')
-            mq.delay(300)
-            local id = tonumber(mq.TLO.DoorTarget.ID()) or 0
-            local distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
-            return id, distance, tostring(mq.TLO.DoorTarget.Name() or '?')
-        end
-        local doorId, distance, doorName = nearestDoor()
-        echo(string.format('Portal check: nearest door %s (id %d) is %.0f units away.', doorName, doorId, distance))
-        if doorId ~= 0 and distance > 15 and distance <= 40 then
-            local doorY = tonumber(mq.TLO.DoorTarget.Y())
-            local doorX = tonumber(mq.TLO.DoorTarget.X())
-            if doorY and doorX then
-                mq.cmdf('/moveto loc %.2f %.2f', doorY, doorX)
-                for _ = 1, 24 do
-                    mq.delay(250)
-                    mq.cmdf('/doortarget id %d', doorId)
-                    distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
-                    if distance <= 10 then break end
-                end
-                mq.cmd('/moveto off')
-            end
-        end
-        if doorId ~= 0 and distance <= 15 then
-            mq.cmdf('/doortarget id %d', doorId)
-            mq.cmd('/face fast door')
-            mq.delay(300)
-            mq.cmd('/click left door')
-            if waitForZoneChange(before, 15) then return true end
-        elseif waitForZoneChange(before, 5) then
-            return true
-        end
-        echo(string.format('Standing at %.2f, %.2f, %.2f; nearest door %s (id %d) at %.0f units. Send this to the developer.',
-            tonumber(mq.TLO.Me.Y()) or 0, tonumber(mq.TLO.Me.X()) or 0, tonumber(mq.TLO.Me.Z()) or 0,
-            doorName, doorId, distance))
+    if clickSwitch(entrance.switch, entrance.door) then return true end
+    if zoneShortName() ~= entrance.zone then return false end
+    local switchKey = entrance.recordingKey or ('switch_' .. entrance.zone .. '_' .. tostring(entrance.switch))
+    local before = zoneId()
+    if not playRecordedPath(switchKey, before) then return false end
+    if zoneId() ~= before then
+        local dungeon = DUNGEONS[zoneId()]
+        if dungeon and dungeon.family == HUBS[homeHubZone].family then return true end
+        echo('Entrance recording zoned into an unexpected zone; not clicking a door.')
         return false
     end
-    if clickSwitch(entrance.switch) then return true end
-    if zoneShortName() ~= entrance.zone then return false end
-    local switchKey = 'switch_' .. entrance.zone .. '_' .. tostring(entrance.switch)
-    return playRecordedPath(switchKey, zoneId()) and clickSwitch(entrance.switch)
+    return clickSwitch(entrance.switch, entrance.door)
 end
 
 local function waitUntilSafeToExit()
@@ -2221,6 +2287,10 @@ local function runPreflight()
     if useSwarmPull then
         check(swarmPullInstalled(), 'Swarm Pull plugin', not swarmPullInstalled() and 'plugin file not found in lua/tac' or nil)
     end
+    if shrinkOnEntry then
+        check(luaFileExists('ldon_shrink.lua'), 'Shrink helper',
+            not luaFileExists('ldon_shrink.lua') and 'copy ldon_shrink.lua into lua on each box' or nil)
+    end
     if useAdvPath then
         check(advPathLoaded(), 'MQ2AdvPath loaded', not advPathLoaded() and 'use /plugin MQ2AdvPath' or nil)
     end
@@ -2256,6 +2326,7 @@ local function diagnosticsText()
             tostring((tonumber(mq.TLO.Group()) or 0) > 0), mainAssistName),
         string.format('longBuffs=%s swarmPull=%s swarmActive=%s retryLimit=%d', tostring(useLongBuffs),
             tostring(useSwarmPull), tostring(swarmActive), retryLimit),
+        string.format('shrinkOnEntry=%s shrinkAttemptZone=%d', tostring(shrinkOnEntry), shrinkAttemptZone),
         'lastFailure=' .. (lastFailure ~= '' and lastFailure or 'none'),
         runSummary(),
         '--- recent log ---',
@@ -2555,12 +2626,17 @@ local function drawUI()
                 useAdvPath = false
                 advPathFirst = false
                 useSwarmPull = false
+                shrinkOnEntry = false
                 hardMode = true
                 echo('Recommended settings applied.')
             end
             ImGui.TextWrapped('Recommended: auto-retry 2, Long-Duration Buffs on if installed, everything else off until you need it.')
             ImGui.Separator()
             ImGui.TextColored(0.95, 0.78, 0.38, 1.0, 'Basic')
+            shrinkOnEntry = ImGui.Checkbox('Shrink on dungeon entry before TAC', shrinkOnEntry)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('One click per entry on each character with a ready Wand of Imperceptibility, Bracelet of the Shadow Hive, or Shimmering Bauble of Trickery, including tiered versions. Missing items or failed clicks are reported without pausing. Group boxes need ldon_shrink.lua and BoxNet slash commands enabled.')
+            end
             retryLimit = ImGui.SliderInt('Auto-retry limit', retryLimit, 0, 5)
             if ImGui.IsItemHovered() then ImGui.SetTooltip('How many times a failed step is retried before the runner pauses. Recommended: 2.') end
             stopAfterMinutes = ImGui.SliderInt('Stop after minutes (0 = off)', stopAfterMinutes, 0, 480)
@@ -2899,6 +2975,7 @@ while not shuttingDown do
         local zone = zoneId()
         if zone ~= lastZone then
             lastZone = zone
+            shrinkAttemptZone = 0
             lastNotice = ''
             if not DUNGEONS[zone] then
                 meshRecoveryRequested = false

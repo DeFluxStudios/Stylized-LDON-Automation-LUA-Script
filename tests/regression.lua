@@ -39,7 +39,7 @@ local function environment()
         campaignInitialized = false, campaignLegIndex = 1,
         campaignPlan = { { hubZone = 392, count = 1, missionTypeIndex = 3 } },
         campaignCompleted = {}, stats = {}, failureStreak = 0,
-        doorId = 7, doorDistance = 8, groupSize = 0,
+        doorId = 7, doorDistance = 8, doorName = 'MineDoor', groupSize = 0,
         MAGUS_NAMES_BY_ZONE = {}, travelReady = true,
     }, { __index = _G })
     run(e, (section('local HUBS =', '-- Campaign defaults'):gsub('local ([%w_]+) =', '%1 =')))
@@ -51,18 +51,25 @@ local function environment()
     e.echo = function(message) e.messages[#e.messages + 1] = message end
     e.zoneId = function() return e.zone end
     e.zoneShortName = function()
-        return ({ [30] = 'everfrost', [392] = 'nro', [393] = 'sro', [413] = 'innothule' })[e.zone] or 'bazaar'
+        return ({ [30] = 'everfrost', [392] = 'nro', [393] = 'sro', [413] = 'innothule',
+            [65] = 'guktop', [57] = 'lfaydark', [54] = 'gfaydark', [68] = 'butcher' })[e.zone] or 'bazaar'
     end
     e.assignmentState = function() return e.assigned, e.completed, e.dialogue, '' end
     e.saveSettings = function() e.saved = true; return true end
     e.stopSwarmPull = function() end
     e.breakInvisibilityForInteraction = function() return true end
     e.navToSpawn = function() return true end
-    e.navToLocation = function(y, x, z, arrival)
-        e.points[#e.points + 1] = { y, x, z, arrival }
+    e.navToLocation = function(y, x, z, arrival, timeout, ignoreArrivalZ)
+        e.points[#e.points + 1] = { y, x, z, arrival, timeout, ignoreArrivalZ }
         if e.navMovesDoor then e.doorDistance = 12 end
         if e.navDropsDoor then e.doorId = 0 end
         return not e.navFails
+    end
+    e.distanceTo = function() return e.cryptDistance or 30 end
+    e.moveToRoutePoint = function(y, x, before)
+        e.directPoint = { y, x, before }
+        if e.directZone then e.zone = e.directZone end
+        return not e.directFails
     end
     e.playRecordedPath = function() e.recordingUsed = true; return false end
     e.waitForZoneChange = function() return not e.noZoneChange end
@@ -121,7 +128,7 @@ local function environment()
             DoorTarget = {
                 ID = function() return e.doorId end,
                 Distance = function() return e.doorDistance end,
-                Name = function() return 'MineDoor' end,
+                Name = function() return e.doorName end,
                 Y = function() return 2774.88 end,
                 X = function() return -4723.56 end,
             },
@@ -136,6 +143,7 @@ local function environment()
     definition(e, 'refreshMissionOptions', 'local function validateController')
     definition(e, 'requestTask', 'local MAGUS_NAMES_BY_ZONE')
     definition(e, 'travelToCamp', 'local function clickSwitch')
+    definition(e, 'travelAcrossZones', 'local function clickDoor')
     definition(e, 'clickSwitch', 'local function enterTask')
     definition(e, 'enterTask', 'local function waitUntilSafeToExit')
     definition(e, 'validateTravelSetup', 'local function beginCampaign')
@@ -153,6 +161,211 @@ local function test(name, fn)
     count = count + 1
     print('PASS ' .. name)
 end
+
+local function shrinkEnvironment(e)
+    assert(loadfile('ldon_shrink.lua'))
+    e.mainAssistName = 'Tester'
+    e.shrinkOnEntry, e.shrinkAttemptZone = false, 0
+    e.active, e.zone = true, 238
+    e.clock, e.height, e.ready, e.owned = 0, 6, true, {}
+    e.mq.gettime = function() return e.clock end
+    e.mq.doevents = function() end
+    e.mq.delay = function() e.clock = e.clock + 250 end
+    e.mq.TLO.Zone = { ID = function() return e.zone end }
+    e.mq.TLO.MacroQuest = { GameState = function() return 'INGAME' end }
+    e.mq.TLO.Me.Combat = function() return false end
+    e.mq.TLO.Me.Dead = function() return false end
+    e.mq.TLO.Me.Height = function() return e.height end
+    e.mq.TLO.Me.Casting = function() return nil end
+    e.mq.TLO.Me.ItemReady = function() return function() return e.ready end end
+    e.targetId = 42
+    e.mq.TLO.Me.ID = function() return 1 end
+    e.mq.TLO.Target = { ID = function() return e.targetId end }
+    e.mq.TLO.Group.Member = function()
+        return { Name = function() return 'OtherBox' end }
+    end
+    e.mq.TLO.FindItem = function(name)
+        return {
+            ID = function() return e.owned[name] and 123 or 0 end,
+            Name = function() return e.owned[name] end,
+        }
+    end
+    local cmd = e.mq.cmd
+    e.mq.cmd = function(command)
+        cmd(command)
+        if command == '/target myself' and not e.selfTargetFails then e.targetId = 1 end
+        if command == '/target id 42' then e.targetId = 42 end
+        if command:find('/useitem', 1, true) and not e.clickFails then e.height = 4 end
+    end
+    local chunk = assert(loadfile('ldon_shrink.lua'))
+    local helperEnv = setmetatable({
+        require = function(name) assert(name == 'mq'); return e.mq end,
+        print = e.echo,
+    }, { __index = _G })
+    setfenv(chunk, helperEnv)
+    e.shrink = chunk('ldon_shrink')
+    e.require = function(name) assert(name == 'ldon_shrink'); return e.shrink end
+    e.luaFileExists = function() return true end
+    e.ensureTriune = function() return true end
+    e.startLongBuffs = function() end
+    e.startSwarmPull = function() end
+    definition(e, 'validateController', 'local function configureGroupTravel')
+    definition(e, 'shrinkGroupOnEntry', 'local function configureGroupCombat')
+    definition(e, 'configureGroupCombat', 'local function monitorCombatPosture')
+end
+
+test('shrink option defaults off and leaves combat setup unchanged', function(e)
+    shrinkEnvironment(e)
+    assert(e.configureGroupCombat())
+    assert(not contains(e.commands, '/useitem'))
+    assert(not contains(e.commands, '/lua run ldon_shrink'))
+    assert(contains(e.commands, '/ac run'))
+end)
+
+test('regular and tiered shrink items each qualify for one self-targeted click', function(e)
+    shrinkEnvironment(e)
+    for _, name in ipairs({
+        'Wand of Imperceptibility', 'Bracelet of the Shadow Hive',
+        'Shimmering Bauble of Trickery',
+    }) do
+        for _, suffix in ipairs({ '', ' (Legendary)', ' (Epic)' }) do
+            e.owned, e.commands, e.height = { [name] = name .. suffix }, {}, 6
+            assert(e.shrink(238))
+            assert(e.commands[1] == '/target myself')
+            assert(e.commands[2] == '/useitem "' .. name .. suffix .. '"')
+            assert(e.commands[3] == '/target id 42' and #e.commands == 3)
+        end
+    end
+end)
+
+test('group shrink runs before TAC and is not repeated on same-zone resume', function(e)
+    shrinkEnvironment(e)
+    e.shrinkOnEntry, e.groupSize = true, 1
+    e.owned['Wand of Imperceptibility'] = 'Wand of Imperceptibility'
+    assert(e.configureGroupCombat())
+    local click, runIndex
+    for index, cmd in ipairs(e.commands) do
+        if cmd:find('/useitem', 1, true) then click = index end
+        if cmd == '/ac run' then runIndex = index end
+    end
+    assert(click and runIndex and click < runIndex and e.clock >= 27000)
+    assert(contains(e.commands, '/ac net group /lua run ldon_shrink 238'))
+    e.commands = {}
+    assert(e.configureGroupCombat())
+    assert(not contains(e.commands, '/useitem'))
+    assert(not contains(e.commands, '/lua run ldon_shrink'))
+    e.shrinkAttemptZone, e.height = 0, 6
+    assert(e.configureGroupCombat())
+    assert(contains(e.commands, '/useitem'))
+end)
+
+test('missing or unready shrink item reports and continues TAC', function(e)
+    shrinkEnvironment(e)
+    e.shrinkOnEntry = true
+    assert(e.configureGroupCombat())
+    assert(contains(e.messages, 'No supported carried shrink item is ready'))
+    assert(contains(e.commands, '/ac run'))
+    e.owned['Wand of Imperceptibility'], e.ready = 'Wand of Imperceptibility', false
+    assert(not e.shrink(238))
+    assert(not contains(e.commands, '/useitem'))
+end)
+
+test('unconfirmed shrink stops after one bounded attempt and continues TAC', function(e)
+    shrinkEnvironment(e)
+    e.shrinkOnEntry, e.clickFails = true, true
+    e.owned['Wand of Imperceptibility'] = 'Wand of Imperceptibility'
+    assert(e.configureGroupCombat())
+    assert(e.clock == 10000)
+    assert(contains(e.messages, 'No size decrease confirmed'))
+    assert(contains(e.commands, '/ac run'))
+end)
+
+test('shrink refuses wrong zone, active casting, and completed adventure', function(e)
+    shrinkEnvironment(e)
+    e.owned['Wand of Imperceptibility'] = 'Wand of Imperceptibility'
+    assert(not e.shrink(999) and e.clock == 15000)
+    e.mq.TLO.Me.Casting = function() return 'Spell' end
+    assert(not e.shrink(238))
+    e.shrinkOnEntry, e.completed = true, true
+    assert(e.configureGroupCombat())
+    assert(not contains(e.commands, '/useitem'))
+end)
+
+test('remote helper waits for arrival and verifies a delayed shrink cast', function(e)
+    shrinkEnvironment(e)
+    e.zone, e.clickFails = 392, true
+    e.owned['Wand of Imperceptibility'] = 'Wand of Imperceptibility'
+    e.mq.TLO.Me.Casting = function()
+        if contains(e.commands, '/useitem') and e.clock < 2000 then return 'Shrink' end
+    end
+    e.mq.delay = function()
+        e.clock = e.clock + 250
+        if e.clock >= 1000 then e.zone = 238 end
+        if e.clock >= 2000 then e.height = 4 end
+    end
+    assert(e.shrink(238))
+    assert(e.clock == 2000 and contains(e.commands, '/target id 42'))
+end)
+
+test('combat and dead characters never click shrink items', function(e)
+    shrinkEnvironment(e)
+    e.owned['Wand of Imperceptibility'] = 'Wand of Imperceptibility'
+    e.mq.TLO.Me.Combat = function() return true end
+    assert(not e.shrink(238))
+    e.mq.TLO.Me.Combat = function() return false end
+    e.mq.TLO.Me.Dead = function() return true end
+    assert(not e.shrink(238))
+    assert(not contains(e.commands, '/useitem'))
+end)
+
+test('shrink never uses an item when self targeting fails', function(e)
+    shrinkEnvironment(e)
+    e.owned['Wand of Imperceptibility'] = 'Wand of Imperceptibility'
+    e.selfTargetFails = true
+    assert(not e.shrink(238))
+    assert(not contains(e.commands, '/useitem'))
+    assert(contains(e.messages, 'Could not confirm self target'))
+end)
+
+test('missing helper reports the problem but still enables TAC', function(e)
+    shrinkEnvironment(e)
+    e.shrinkOnEntry = true
+    e.luaFileExists = function() return false end
+    assert(e.configureGroupCombat())
+    assert(contains(e.messages, 'is missing'))
+    assert(contains(e.commands, '/ac run'))
+end)
+
+test('cancelling group preparation never enables TAC', function(e)
+    shrinkEnvironment(e)
+    e.shrinkOnEntry, e.groupSize = true, 1
+    e.mq.doevents = function() e.active = false end
+    assert(not e.configureGroupCombat())
+    assert(not contains(e.commands, '/ac run'))
+end)
+
+test('shrink option loads only a saved boolean and persists with settings', function(e)
+    shrinkEnvironment(e)
+    definition(e, 'loadSettings', '\nloadSettings()')
+    e.loadfile = function() return function() return { shrinkOnEntry = true } end end
+    e.loadSettings()
+    assert(e.shrinkOnEntry == true)
+    e.loadfile = function() return function() return { shrinkOnEntry = 'false' } end end
+    e.loadSettings()
+    assert(e.shrinkOnEntry == true)
+    e.loadfile = function() return function() return { shrinkOnEntry = false } end end
+    e.loadSettings()
+    assert(e.shrinkOnEntry == false)
+    e.swarmPullCount, e.swarmPullRadius, e.retryLimit = 3, 150, 2
+    e.settingsPath = 'mock-settings'
+    local written
+    e.io = { open = function()
+        return { write = function(_, text) written = text end, close = function() end }
+    end }
+    definition(e, 'saveSettings', 'local function loadSettings')
+    assert(e.saveSettings())
+    assert(written:find('shrinkOnEntry = false', 1, true))
+end)
 
 test('all five choices exist before any interaction; mob count is default', function(e)
     assert(#e.missionOptions == 5 and e.missionTypeIndex == 3)
@@ -209,16 +422,290 @@ test('snowy mine follows exact approach and entrance then clicks expected door',
     e.zone, e.homeHubZone = 30, 30
     assert(e.enterTask(30, 'The safest entrance we could locate is through a snowy mine in Everfrost Peaks.'))
     assert(#e.points == 2)
-    assert(e.points[1][1] == 2697.71 and e.points[1][2] == -4686.63 and e.points[1][3] == -87.75)
-    assert(e.points[2][1] == 2774.88 and e.points[2][2] == -4723.56 and e.points[2][3] == -93.31)
+    assert(e.points[1][1] == 2697.18 and e.points[1][2] == -4694.15 and e.points[1][3] == -91.06)
+    assert(e.points[2][1] == 2771.57 and e.points[2][2] == -4725.96 and e.points[2][3] == -104)
     assert(contains(e.commands, '/doortarget id 7') and contains(e.commands, '/click left door'))
 end)
 
 test('portal remains a separate route', function(e)
     e.zone, e.homeHubZone = 30, 30
+    e.doorName = 'MIRPORTAL700'
     assert(e.enterTask(30, 'Enter the glimmering portal in Everfrost Peaks.'))
     assert(e.points[1][1] == -974.81 and e.points[2][1] == -829.68)
     assert(contains(e.commands, '/click left door'))
+end)
+
+test('mine walks from screenshot mesh stop and only clicks after verified arrival', function(e)
+    e.zone, e.homeHubZone, e.active = 30, 30, true
+    local distance = math.sqrt(9.44 ^ 2 + 14.53 ^ 2 + 21.18 ^ 2)
+    e.distance3DTo = function() return distance end
+    e.mq.doevents = function() end
+    e.navToLocation = function(y) return y == 2697.18 end
+    e.mq.delay = function() distance = 8 end
+    assert(e.enterTask(30, 'snowy mine'))
+    assert(contains(e.commands, '/moveto loc 2771.57 -4725.96'))
+    assert(contains(e.commands, '/moveto off'))
+    assert(contains(e.commands, '/click left door'))
+end)
+
+test('mine fallback cannot accept a stuck or distant mesh stop', function(e)
+    e.zone, e.homeHubZone, e.active = 30, 30, true
+    e.mq.doevents = function() end
+    e.navToLocation = function(y) return y == 2697.18 end
+    e.distance3DTo = function() return 27 end
+    assert(not e.enterTask(30, 'snowy mine'))
+    assert(contains(e.commands, '/moveto off') and not contains(e.commands, '/click left door'))
+    e.commands = {}
+    e.distance3DTo = function() return 36 end
+    assert(not e.enterTask(30, 'snowy mine'))
+    assert(not contains(e.commands, '/moveto loc'))
+end)
+
+test('mine walking stops on cancellation or zoning without clicking', function()
+    for _, cancel in ipairs({true, false}) do
+        local e = environment()
+        e.zone, e.homeHubZone, e.active = 30, 30, true
+        e.navToLocation = function(y) return y == 2697.18 end
+        e.distance3DTo = function() return 27 end
+        e.mq.doevents = function()
+            if cancel then e.active = false else e.zone = 232 end
+        end
+        assert(e.enterTask(30, 'snowy mine') == not cancel)
+        assert(contains(e.commands, '/moveto off'))
+        assert(not contains(e.commands, '/click left door'))
+    end
+end)
+
+test('Everfrost portal never clicks a wall door when the named portal is absent', function(e)
+    e.zone, e.homeHubZone, e.doorName = 30, 30, 'EFWALL1'
+    assert(not e.enterTask(30, 'glimmering portal of magic'))
+    assert(contains(e.commands, '/doortarget MIRPORTAL700'))
+    assert(not contains(e.commands, '/click left door'))
+end)
+
+test('North Ro reaches quicksand approach before targeting the nearest entrance', function(e)
+    e.zone, e.homeHubZone = 392, 392
+    assert(e.enterTask(392, 'quicksand pit in Northern Ro'))
+    assert(#e.points == 1 and e.points[1][1] == 5562.44)
+    assert(e.points[1][2] == -1183.15 and e.points[1][3] == 25.01)
+    assert(contains(e.commands, '/doortarget id 7'))
+    assert(not contains(e.commands, '/doortarget id 3'))
+end)
+
+test('Rujark approaches the cave in South Ro and targets OBJ_ZONEBOX', function(e)
+    e.zone, e.homeHubZone, e.doorName = 393, 408, 'OBJ_ZONEBOX'
+    assert(e.enterTask(393, 'Through a cave'))
+    assert(#e.points == 1 and e.points[1][1] == 5 and e.points[1][2] == -222)
+    assert(e.points[1][3] == 129.58)
+    assert(contains(e.commands, '/doortarget OBJ_ZONEBOX'))
+end)
+
+test('Guktop barricaded door uses GKPORTAL701 and recorded approach', function(e)
+    e.zone, e.homeHubZone, e.doorName = 65, 393, 'GKPORTAL701'
+    assert(e.enterTask(65, 'barricaded door'))
+    assert(#e.points == 1 and e.points[1][1] == 441.77)
+    assert(e.points[1][2] == 228.63 and e.points[1][3] == -9.13)
+    assert(contains(e.commands, '/doortarget GKPORTAL701'))
+end)
+
+test('Triune tree-trunk approach is retained instead of replacing it with live-server coordinates', function(e)
+    e.zone, e.homeHubZone = 413, 393
+    assert(e.enterTask(413, 'rotting tree trunk'))
+    assert(#e.points == 2 and e.points[1][1] == 1389.12 and e.points[2][1] == 1245.50)
+end)
+
+test('Mistmoore grave uses corrected map location and nearby door', function(e)
+    e.zone, e.homeHubZone, e.doorName = 57, 68, 'MISTPORT701'
+    e.zoneShortName = function() return 'lfaydark' end
+    assert(e.enterTask(57, 'unearthed grave'))
+    assert(e.points[1][1] == -67 and e.points[1][2] == 3843 and e.points[1][3] == nil)
+    assert(contains(e.commands, '/doortarget id 7'))
+end)
+
+test('Mistmoore crypt follows both screenshot points and clicks the named door', function(e)
+    e.zone, e.homeHubZone = 57, 68
+    e.doorName = 'MISTFCFN700'
+    e.zoneShortName = function() return 'lfaydark' end
+    e.moveThroughBoundary = function() error('must not use the old grave crossing') end
+    assert(e.enterTask(57, 'Find a crypt'))
+    assert(#e.points == 2)
+    assert(e.points[1][1] == -739.37 and e.points[1][2] == 3793.22 and e.points[1][3] == 1.06)
+    assert(e.points[2][1] == -760.27 and e.points[2][2] == 3838.85 and e.points[2][3] == 0)
+    assert(e.points[1][6] == nil and e.points[2][6] == true)
+    assert(contains(e.commands, '/doortarget MISTFCFN700'))
+    assert(not e.directPoint and contains(e.commands, '/click left door'))
+end)
+
+test('crypt navigation rejects an unrelated zone change', function(e)
+    e.zone, e.homeHubZone = 57, 68
+    e.zoneShortName = function() return 'lfaydark' end
+    e.navToLocation = function() e.zone = 54; return true end
+    assert(not e.enterTask(57, 'Find a crypt'))
+    assert(not contains(e.commands, '/click left door'))
+end)
+
+test('crypt nav retains Z=0 but accepts the building floor by planar arrival', function(e)
+    definition(e, 'navToLocation', 'local function navToSpawn')
+    local y, x, z = -739.37, 3793.22, 1.06
+    e.mq.TLO.Me.Y = function() return y end
+    e.mq.TLO.Me.X = function() return x end
+    e.mq.TLO.Me.Z = function() return z end
+    e.waitForNavigation = function(_, reached)
+        y, x, z = -760.27, 3838.85, 7.20
+        assert(reached())
+        return true
+    end
+    e.zone, e.homeHubZone, e.doorName = 57, 68, 'MISTFCFN700'
+    assert(e.enterTask(57, 'Find a crypt'))
+    assert(contains(e.commands, '/nav loc -760.27 3838.85 0.00'))
+    assert(contains(e.commands, '/click left door'))
+end)
+
+test('planar arrival still rejects horizontal misses and default arrival checks height', function(e)
+    definition(e, 'navToLocation', 'local function navToSpawn')
+    e.mq.TLO.Me.Y = function() return -756.27 end
+    e.mq.TLO.Me.X = function() return 3838.85 end
+    e.mq.TLO.Me.Z = function() return 7.20 end
+    e.waitForNavigation = function() return true end
+    assert(not e.navToLocation(-760.27, 3838.85, 0, 3, 60, true))
+    e.mq.TLO.Me.Y = function() return -760.27 end
+    assert(not e.navToLocation(-760.27, 3838.85, 0, 3, 60))
+    assert(e.navToLocation(-760.27, 3838.85, 0, 3, 60, true))
+end)
+
+test('walking into the snowy mine must not click a door after zoning', function(e)
+    e.zone, e.homeHubZone = 30, 30
+    local nav = e.navToLocation
+    e.navToLocation = function(...)
+        nav(...)
+        if #e.points == 2 then e.zone = 232; return false end
+        return true
+    end
+    assert(e.enterTask(30, 'snowy mine'))
+    assert(not contains(e.commands, '/doortarget') and not contains(e.commands, '/click left door'))
+end)
+
+test('unexpected zoning during approach does not click or claim entrance success', function(e)
+    e.zone, e.homeHubZone = 30, 30
+    e.navToLocation = function() e.zone = 392; return true end
+    assert(not e.enterTask(30, 'snowy mine'))
+    assert(not contains(e.commands, '/click left door'))
+end)
+
+test('entrance recording that zones does not click again in the dungeon', function(e)
+    e.zone, e.homeHubZone, e.doorName = 30, 30, 'EFWALL1'
+    e.playRecordedPath = function(key)
+        assert(key == 'switch_everfrost_0')
+        e.zone = 232
+        return true
+    end
+    assert(e.enterTask(30, 'glimmering portal'))
+    assert(not contains(e.commands, '/click left door'))
+end)
+
+test('unknown Guk and Mistmoore directions do not guess an entrance', function()
+    for _, hub in ipairs({ 393, 68 }) do
+        local e = environment()
+        e.homeHubZone = hub
+        assert(not e.enterTask(e.zone, 'unrecognized assignment directions'))
+        assert(#e.points == 0 and #e.commands == 0)
+    end
+end)
+
+test('North Ro approach rejects a distant nearest door instead of following it', function(e)
+    e.zone, e.homeHubZone, e.doorDistance = 392, 392, 100
+    assert(not e.enterTask(392, 'quicksand pit'))
+    assert(#e.points == 1 and not contains(e.commands, '/click left door'))
+end)
+
+test('nearest-door approach limit accepts 40 units but rejects anything beyond it', function()
+    for _, distance in ipairs({ 40, 40.01 }) do
+        local e = environment()
+        e.zone, e.homeHubZone, e.doorDistance, e.navMovesDoor = 392, 392, distance, true
+        local nav = e.navToLocation
+        e.navToLocation = function(...)
+            e.navMovesDoor = #e.points > 0
+            return nav(...)
+        end
+        assert(e.enterTask(392, 'quicksand pit') == (distance == 40))
+        assert(contains(e.commands, '/click left door') == (distance == 40))
+    end
+end)
+
+test('crypt directions mentioning a graveyard do not select the grave door', function(e)
+    e.zone, e.homeHubZone = 57, 68
+    e.doorName = 'MISTFCFN700'
+    e.moveThroughBoundary = function() e.zone = 238; return true end
+    assert(e.enterTask(57, 'Search the graveyard and find a crypt'))
+    assert(e.points[1][1] == -739.37 and contains(e.commands, '/doortarget MISTFCFN700'))
+end)
+
+test('crypt uses screenshot heights rather than the unmapped macro coordinate', function(e)
+    e.zone, e.homeHubZone = 57, 68
+    e.doorName = 'MISTFCFN700'
+    local point = 0
+    e.navToLocation = function(y, x, z)
+        point = point + 1
+        if point == 1 then assert(y == -739.37 and x == 3793.22 and z == 1.06)
+        else assert(y == -760.27 and x == 3838.85 and z == 0) end
+        return true
+    end
+    e.moveThroughBoundary = function() e.zone = 238; return true end
+    assert(e.enterTask(57, 'Find a crypt'))
+end)
+
+test('crypt refuses an unrelated door instead of clicking the nearest object', function(e)
+    e.zone, e.homeHubZone, e.doorDistance = 57, 68, 50.01
+    assert(not e.enterTask(57, 'Find a crypt'))
+    assert(not e.directPoint and not contains(e.commands, '/click left door'))
+end)
+
+test('grave rejects a distant nearest door', function(e)
+    e.zone, e.homeHubZone, e.doorDistance = 57, 68, 50
+    assert(not e.enterTask(57, 'unearthed grave'))
+    assert(not e.directPoint and not contains(e.commands, '/click left door'))
+end)
+
+test('crypt failed navigation stops before holding forward', function(e)
+    e.zone, e.homeHubZone, e.navFails = 57, 68, true
+    e.moveThroughBoundary = function() error('must not hold forward after failed approach') end
+    assert(not e.enterTask(57, 'Find a crypt'))
+end)
+
+test('crypt approach zoning succeeds without another boundary movement', function(e)
+    e.zone, e.homeHubZone = 57, 68
+    e.navToLocation = function() e.zone = 238; return true end
+    e.moveThroughBoundary = function() error('must not move after instance zoning') end
+    assert(e.enterTask(57, 'Find a crypt'))
+end)
+
+test('grave approach rejects unrelated zoning', function(e)
+    e.zone, e.homeHubZone = 57, 68
+    e.navToLocation = function() e.zone = 54; return true end
+    assert(not e.enterTask(57, 'unearthed grave'))
+end)
+
+test('route short-name aliases are normalized consistently with zone IDs', function(e)
+    definition(e, 'zoneShortName', 'local function selectHomeHub')
+    for alias, canonical in pairs({
+        northro = 'nro', southro = 'sro', commonlands = 'commons', ecommons = 'commons',
+        butcherblock = 'butcher', greaterfaydark = 'gfaydark', lesserfaydark = 'lfaydark',
+    }) do
+        e.mq.TLO.Zone = { ShortName = function() return alias end }
+        assert(e.zoneShortName() == canonical)
+    end
+end)
+
+test('Guk travel can resume in Innothule without trying to recross South Ro', function(e)
+    e.zone = 413
+    local crossings = {}
+    e.runZoneCrossing = function(route)
+        crossings[#crossings + 1] = route
+        e.zone = 65
+        return true
+    end
+    assert(e.travelAcrossZones({ 'innothule', 'guktop' }))
+    assert(#crossings == 1 and crossings[1] == e.ZONE_CROSSINGS.innothule_to_guktop)
 end)
 
 test('unknown Everfrost directions fail without movement or clicks', function(e)

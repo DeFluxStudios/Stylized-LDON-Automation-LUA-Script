@@ -20,20 +20,19 @@ instructions for those projects separately.
 
 ## Windows installation
 
-1. Download `LDON-Triune-v1.3.2-windows.zip` from the GitHub release.
-   Its SHA-256 checksum is:
-   98a2f9aca51230431a739a1476a82e95108f22912e9662eca260724ad31173d4
-2. Before extracting, compare the checksum above with the checksum of your
+1. Download `LDON-Triune-v1.4.6-windows.zip` from the GitHub release.
+   The release notes list its SHA-256 checksum in plain text.
+2. Before extracting, compare the published checksum with the checksum of your
    downloaded file. The release includes `SHA256SUMS.txt`; on Windows, you can
    calculate the local checksum in PowerShell with:
 
    ```powershell
-   Get-FileHash .\LDON-Triune-v1.3.2-windows.zip -Algorithm SHA256
+   Get-FileHash .\LDON-Triune-v1.4.6-windows.zip -Algorithm SHA256
    ```
 
    The hash must match exactly. If it does not, download the file again.
 3. Right-click the ZIP and choose **Extract All...**.
-4. Open the extracted `LDON-Triune-v1.3.2` folder.
+4. Open the extracted `LDON-Triune-v1.4.6` folder.
 5. Copy `LDON_Triune.lua` into the `lua` folder inside your MacroQuest
    installation. For example:
 
@@ -44,6 +43,9 @@ instructions for those projects separately.
    If your MacroQuest folder is somewhere else, use that installation's `lua`
    folder instead. Do not copy the whole extracted folder into `lua`; copy the
    `.lua` file itself.
+   For optional **Shrink on dungeon entry before TAC**, also copy
+   `ldon_shrink.lua` alongside the runner on every box. The option defaults off;
+   group boxes require connected BoxNet with peer slash commands enabled.
 6. In game, open the MacroQuest console and enter:
 
    ```text
@@ -59,17 +61,16 @@ materials. They do not need to be copied into MacroQuest's `lua` folder.
 
 ## Linux archive
 
-The file `LDON-Triune-v1.3.2-linux.tar.gz` can be extracted with a desktop
-archive utility or with. Its SHA-256 checksum is:
-
-fcc98ec50ebbd50467bdd3e150f5ed26e64c0db9e0e289e142972e61ade10354
+The file `LDON-Triune-v1.4.6-linux.tar.gz` can be extracted with a desktop
+archive utility or the command below. Its SHA-256 checksum is listed in the
+release notes and `SHA256SUMS.txt`.
 
 Compare it with the checksum of your downloaded archive before extracting.
 The release includes `SHA256SUMS.txt`. You can verify from a terminal with:
 
 ```sh
 sha256sum -c SHA256SUMS.txt
-tar -xzf LDON-Triune-v1.3.2-linux.tar.gz
+tar -xzf LDON-Triune-v1.4.6-linux.tar.gz
 ```
 
 The extracted folder has the same contents as the Windows ZIP. Copy

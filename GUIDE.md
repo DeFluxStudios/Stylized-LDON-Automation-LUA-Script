@@ -43,8 +43,8 @@ configuration, route, or navmesh will behave identically.
 - When a Bazaar return is used, Magus Alaria is recognized; the existing East
   Commonlands Magus route remains available when the ability returns there.
 - Everfrost entrance directions select separate routes. **Snowy mine** uses
-  approach `2697.71, -4686.63, -87.75`, then entrance
-  `2774.88, -4723.56, -93.31` (Y, X, Z). Portal directions retain the separate
+  approach `2697.18, -4694.15, -91.06`, then entrance
+  `2771.57, -4725.96, -104` (Y, X, Z; final height is a user-requested test). Portal directions retain the separate
   portal approach. Unrecognized Everfrost directions stop the entrance attempt
   and are printed to the log instead of guessing. The mine targets a nearby
   door and uses the existing click-range and zoning checks.
@@ -52,6 +52,70 @@ configuration, route, or navmesh will behave identically.
 Travel depends on server zone IDs, NPC names, abilities, navmeshes, and
 MacroQuest plugins being suitable for the character and server. Some routes
 may require manual assistance.
+
+### Entrance cross-check against LDON.mac
+
+Unreleased route changes were cross-checked against the user-supplied
+`LDON.mac` by Cannonballdex (with the contributors credited in that macro).
+Only route facts were adapted, not its combat, networking or repeated-click
+loops. Coordinates below are Y, X, Z.
+
+| Camp / entrance | Approach and interaction |
+| --- | --- |
+| North Ro / quicksand | `5562.44, -1183.15, 25.01`; select the nearby entrance, not a fixed switch 3 |
+| Rujark / cave in South Ro | `5, -222, 129.58`; target `OBJ_ZONEBOX`, not Scout Miigle or fixed switch 1 |
+| Guktop / barricaded door | `441.77, 228.63, -9.13`; target `GKPORTAL701` |
+| Innothule / rotting tree trunk | Keep the Triune points `1389.12, 1145.40, -15.62` and `1245.50, 1186.58, -10.49`; select a nearby entrance |
+| Mistmoore / unearthed grave | Current test map point `-67, 3843`, without forcing Z; select the nearby entrance |
+| Mistmoore / crypt | Screenshot approaches `-739.37, 3793.22, 1.06`, then `-760.27, 3838.85, 0` (Z adjusted for the navmesh beneath the building); target `MISTFCFN700` by name |
+| Everfrost / portal | Keep the Triune approach points; target `MIRPORTAL700` rather than the nearest wall |
+| Everfrost / snowy mine | Keep the user's two Triune points documented above; accept instance zoning while approaching, otherwise select a nearby entrance |
+
+Nearest-door routes reject targets more than 40 units from the approach.
+The final snowy-mine point allows a 10-second MoveUtils walk if navigation
+stops within 35 units in 3D. It still requires arrival within 10 units in 3D
+before targeting a door; pause and zoning stop the walk.
+Named-door routes require the target name to match and preserve the existing
+15-unit click-range checks. Unknown Guk, Mistmoore or Everfrost directions are
+reported instead of selecting a default entrance. Navigation that zones into
+the expected dungeon is complete and does not click again.
+
+The macro's return-to-hub points/headings match the existing Lua. Its outbound
+zone-line points differ from the user's recorded Triune paths, so those Lua
+paths are retained. In particular, the macro's tree-trunk coordinates are not
+substituted for the user's Triune route. Test the new named-door identities and
+approach points in game before releasing these changes.
+
+The user's latest screenshots provide two exact crypt approaches and the door
+name `MISTFCFN700`; these replace the earlier rounded crypt map point.
+The grave test point remains `-67, 3843`, and is not yet verified.
+The final crypt waypoint keeps navigation Z=0 but checks arrival using only Y/X,
+within 3 units, so the building floor's height does not block the door click.
+Other waypoint arrival checks and the door's click-range checks are unchanged.
+The old heading-125 crossing toward `-766.75, 3824.95` is not used for crypt
+missions. Crypt entry requires the named door; grave entry uses nearby-door
+checks. Actual instance zoning during navigation ends the approach without
+clicking. The updated crypt path and door interaction need in-game verification.
+
+### Optional shrink before TAC
+
+Enable **Shrink on dungeon entry before TAC** under **Options and optional
+plugins > Basic**. It is saved per character and defaults off. Before enabling
+combat in a new adventure, the runner attempts one ready carried clicky:
+Wand of Imperceptibility, Bracelet of the Shadow Hive, or Shimmering Bauble of
+Trickery. Partial-name matching includes regular and tiered versions, not just
+Legendary. Missing/unready items and unconfirmed size changes are reported,
+then the runner continues. It does not attempt another click on pause/resume
+in the same zone, or when the adventure is already complete.
+
+Copy `ldon_shrink.lua` alongside `LDON_Triune.lua` on every box. Group shrinking
+uses `/ac net group /lua run ldon_shrink <zone ID>`; BoxNet must be connected
+and accept peer slash commands. Each box checks its own zone, inventory and
+item readiness, targets itself and verifies a height decrease. It allows up
+to 15 seconds to arrive and 10 seconds to confirm the click. The controller
+waits for this bounded window before enabling TAC, but cannot confirm remote
+delivery or success. Check each box's `[LDoN Shrink]` messages. Already being
+minimum size can produce the no-size-decrease message. No retry is made.
 
 ### Regression checks
 
