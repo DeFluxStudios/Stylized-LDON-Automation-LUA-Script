@@ -28,11 +28,11 @@ $zip = Join-Path $dist "$name-windows.zip"
 $tar = Join-Path $dist "$name-linux.tar.gz"
 Remove-Item $zip, $tar -ErrorAction SilentlyContinue
 Compress-Archive -Path $stage -DestinationPath $zip
-tar -czf $tar -C $dist $name
+& "$env:SystemRoot\System32\tar.exe" -czf $tar -C $dist $name
 if ($LASTEXITCODE -ne 0) { throw 'tar failed.' }
 
 $sums = foreach ($archive in $zip, $tar) {
     '{0}  {1}' -f (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower(), (Split-Path -Leaf $archive)
 }
-$sums | Set-Content (Join-Path $dist 'SHA256SUMS.txt')
+[IO.File]::WriteAllText((Join-Path $dist 'SHA256SUMS.txt'), ($sums -join "`n") + "`n")
 $sums

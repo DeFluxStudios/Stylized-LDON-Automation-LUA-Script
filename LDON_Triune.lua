@@ -1,13 +1,13 @@
 -- LDoN task runner for MacroQuest and Triune AutoCombat.
 -- Start with /lua run LDON_Triune. Solo runs are supported; grouped runs should
--- be started by the group leader. The Main Assist becomes Puller - Hunt.
+-- be started from the one character that runs the mission. Roles are set in the Group Roles window.
 --
 -- Attribution: LDoN mission and travel reference details were adapted from the
 -- user-provided LDON.lua by Cyfer. Camp/theme relationships, recruiter and
 -- mission-request flow, and dungeon entrance/exit routing were reorganized for
 -- MacroQuest Lua. The campaign scheduler, Triune integration, UI, and recovery
 -- behavior are additions to this runner.
--- Additional entrance coordinates, door names and crypt crossing details were
+-- Additional entrance coordinates and door names were
 -- cross-checked against LDON.mac by Cannonballdex and its credited contributors.
 --
 -- Optional Triune plugin integrations (each is off unless enabled in the window):
@@ -21,7 +21,7 @@
 local mq = require('mq')
 local ImGui = require('ImGui')
 
-local VERSION = '1.4.6'
+local VERSION = '1.4.7'
 
 -- Hub, zone-line, and dungeon metadata used by the travel state machine.
 local HUBS = {
@@ -160,6 +160,13 @@ local CAMP_DISPLAY = {
     [392] = 'North Desert of Ro: Takish-Hiz',
 }
 local mainAssistName = tostring(mq.TLO.Me.CleanName() or '')
+-- Script-owned group roles. One table, because the main chunk is close to LuaJIT's limit of 200
+-- local variables. An empty tank or puller name follows the Main Assist.
+local groupRoles = {
+    tank = '', puller = '', open = false, applyPending = false, status = '',
+    applied = {}, behindOff = '', swarmOwner = '', checkedAt = 0,
+    healers = { clr = true, dru = true, shm = true, pal = true, rng = true, bst = true }, classCache = {},
+}
 local active = false
 local runnerStartPending = false
 local shuttingDown = false
@@ -168,6 +175,7 @@ local lastNotice = ''
 local lastZone = 0
 local triuneReady = false
 local combatZone = 0
+local entryPositionZone = 0
 local combatRunStartedAt = 0
 local combatRunSends = 0
 local travelReady = false
@@ -202,6 +210,7 @@ local campaignInitialized = false
 local useLongBuffs = false
 local shrinkOnEntry = false
 local shrinkAttemptZone = 0
+local remoteReturning = false
 local useAdvPath = false
 local advPathFirst = false
 local useSwarmPull = false
@@ -276,7 +285,7 @@ local function startLongBuffs()
         return
     end
     mq.cmd('/ac longbuff on')
-    if (tonumber(mq.TLO.Group()) or 0) > 0 then mq.cmd('/ac net group longbuff on') end
+    groupRoles.sendToOthers('longbuff on')
 end
 
 local function startSwarmPull()
@@ -285,7 +294,9 @@ local function startSwarmPull()
         echo('Swarm Pull is enabled but the plugin file was not found in lua/tac; skipping.')
         return
     end
-    mq.cmdf('/ac swarm start %d %d', swarmPullCount, swarmPullRadius)
+    local _, _, puller = groupRoles.names()
+    groupRoles.swarmOwner = puller
+    groupRoles.sendTo(puller, string.format('swarm start %d %d', swarmPullCount, swarmPullRadius))
     swarmActive = true
     echo('Swarm Pull started. Turn off "Reset via Bazaar when idle" in its window so it never leaves the dungeon.')
 end
@@ -293,8 +304,9 @@ end
 local function stopSwarmPull(resumeCombat)
     if not swarmActive then return end
     swarmActive = false
-    mq.cmd('/ac swarm stop')
-    if resumeCombat then mq.cmd('/ac run') end
+    local owner = groupRoles.swarmOwner ~= '' and groupRoles.swarmOwner or tostring(mq.TLO.Me.CleanName() or '')
+    groupRoles.sendTo(owner, 'swarm stop')
+    if resumeCombat then groupRoles.sendTo(owner, 'run') end
 end
 
 local function setSwarmPull(enabled)
@@ -303,6 +315,12 @@ local function setSwarmPull(enabled)
     echo('Swarm Pull ' .. (enabled and 'enabled; it starts when combat begins inside a dungeon.' or 'disabled.'))
 end
 
+mq.event('LDON_AdventureFailed', '#*#You have failed your Adventure#*#', function()
+    if active then groupRoles.adventureFailed = true end
+end)
+mq.event('LDON_AdventureEnding', '#*#This adventure will end in #*# and your party will be ejected#*#', function(line)
+    if active and not tostring(line):lower():find('lesser reward', 1, true) then groupRoles.adventureFailed = true end
+end)
 mq.event('LDON_AdventureComplete', '#*#You have successfully completed your adventure#*#', function()
     if active then adventureCompleted = true end
 end)
@@ -386,6 +404,8 @@ end
 local ASSIGNMENT_CAMP_KEYWORDS = {
     { 'deepest guk', 393 }, { 'takish', 392 }, { 'rujarkian', 408 },
     { 'mistmoore', 68 }, { 'miragul', 30 }, { 'everfrost', 30 },
+    { 'upper guk', 393 }, { 'innothule', 393 }, { 'lesser faydark', 68 },
+    { 'cave in southern ro', 408 }, { 'northern ro', 392 },
 }
 
 local function hubFromAssignment(dialogue)
@@ -409,6 +429,9 @@ local function saveSettings()
     local lines = {
         'return {',
         string.format('    mainAssistName = %q,', mainAssistName),
+        string.format('    mainTankName = %q,', groupRoles.tank),
+        string.format('    pullerName = %q,', groupRoles.puller),
+        string.format('    tankBehindOff = %q,', groupRoles.behindOff),
         string.format('    autoStandInCombat = %s,', tostring(autoStandInCombat)),
         string.format('    campaignLoop = %s,', tostring(campaignLoop)),
         string.format('    useLongBuffs = %s,', tostring(useLongBuffs)),
@@ -448,6 +471,9 @@ local function loadSettings()
     if type(saved.mainAssistName) == 'string' and saved.mainAssistName ~= '' then
         mainAssistName = saved.mainAssistName
     end
+    if type(saved.mainTankName) == 'string' then groupRoles.tank = saved.mainTankName end
+    if type(saved.pullerName) == 'string' then groupRoles.puller = saved.pullerName end
+    if type(saved.tankBehindOff) == 'string' then groupRoles.behindOff = saved.tankBehindOff end
     if type(saved.autoStandInCombat) == 'boolean' then autoStandInCombat = saved.autoStandInCombat end
     if type(saved.campaignLoop) == 'boolean' then campaignLoop = saved.campaignLoop end
     if type(saved.useLongBuffs) == 'boolean' then useLongBuffs = saved.useLongBuffs end
@@ -464,7 +490,8 @@ local function loadSettings()
             local savedLeg = saved.legs[leg.hubZone]
             if type(savedLeg) == 'table' then
                 leg.count = number(savedLeg.count, 0, 10, leg.count)
-                leg.missionTypeIndex = number(savedLeg.missionTypeIndex, 1, 99, leg.missionTypeIndex)
+                local savedType = number(savedLeg.missionTypeIndex, 1, 99, leg.missionTypeIndex)
+                if savedType <= 5 then leg.missionTypeIndex = savedType end
             end
         end
     end
@@ -474,6 +501,7 @@ loadSettings()
 
 -- Returns true when the caller should keep running (a retry was granted).
 local function handleFailure(reason, retryable)
+    if not active then return false end
     stats.failures = stats.failures + 1
     lastFailure = reason
     failureStreak = failureStreak + 1
@@ -500,7 +528,178 @@ local function windowText(windowName, childName)
     return tostring(value or '')
 end
 
+-- Group roles. This client has no native group roles to read, so the runner keeps its own and sends
+-- each box its setup by name. Named BoxNet sends also reach boxes in another zone, which /ac net
+-- group skips. Triune has no Main Tank setting: its "Tank" spell target is that box's Main Assist,
+-- so healers assist the Main Tank when it differs from the Main Assist.
+local function groupNames()
+    local names = { tostring(mq.TLO.Me.CleanName() or '') }
+    local count = tonumber(mq.TLO.Group()) or 0
+    for index = 1, count do
+        local name = tostring(mq.TLO.Group.Member(index).Name() or '')
+        if name ~= '' then names[#names + 1] = name end
+    end
+    return names
+end
+
+-- Returns the Main Tank, Main Assist and Puller, matching the group's spelling of each name.
+function groupRoles.names()
+    local me = tostring(mq.TLO.Me.CleanName() or '')
+    if (tonumber(mq.TLO.Group()) or 0) == 0 then return me, me, me end
+    local exact = {}
+    for _, name in ipairs(groupNames()) do exact[name:lower()] = name end
+    local assist = mainAssistName ~= '' and mainAssistName or me
+    assist = exact[assist:lower()] or assist
+    local tank = groupRoles.tank ~= '' and groupRoles.tank or assist
+    local puller = groupRoles.puller ~= '' and groupRoles.puller or assist
+    return exact[tank:lower()] or tank, assist, exact[puller:lower()] or puller
+end
+
+function groupRoles.issues()
+    local members, issues = {}, {}
+    for _, name in ipairs(groupNames()) do members[name:lower()] = true end
+    local tank, assist, puller = groupRoles.names()
+    for _, role in ipairs({ { 'Main Tank', tank }, { 'Main Assist', assist }, { 'Puller', puller } }) do
+        if not members[role[2]:lower()] then
+            issues[#issues + 1] = role[1] .. ' ' .. role[2] .. ' is not in this group.'
+        end
+    end
+    return issues
+end
+
+function groupRoles.summary()
+    local tank, assist, puller = groupRoles.names()
+    return string.format('Main Tank: %s   Main Assist: %s   Puller: %s', tank, assist, puller)
+end
+
+-- Windows read this once a second rather than querying the group every frame.
+function groupRoles.snapshot()
+    local now = mq.gettime()
+    if not groupRoles.view or now - groupRoles.view.at >= 1000 then
+        groupRoles.view = {
+            at = now, plan = groupRoles.plan(), issues = groupRoles.issues(), summary = groupRoles.summary(),
+        }
+    end
+    return groupRoles.view
+end
+
+-- Characters here have three classes, which the game's Class member does not show. Triune saves them
+-- in each character's loadout, so read that file as text. A box with no readable loadout falls back
+-- to its one live class, which needs its spawn and so reads empty until it is in this zone.
+function groupRoles.savedClasses(name)
+    if groupRoles.classCache[name] then return groupRoles.classCache[name] end
+    local dir = tostring(mq.configDir or 'config')
+    local server = tostring(mq.TLO.EverQuest.ServerName() or ''):gsub('[^%w]', '_')
+    for _, tag in ipairs({ server .. '_' .. name, '_' .. name }) do
+        local file = io.open(dir .. '/triune_loadout_' .. tag .. '.lua', 'r')
+        if file then
+            local body = file:read('*a') or ''
+            file:close()
+            local block = body:match('%["classes"%]%s*=%s*(%b{})')
+            local classes = {}
+            for class in tostring(block or ''):gmatch('"(%a+)"') do classes[#classes + 1] = class end
+            if #classes > 0 then
+                groupRoles.classCache[name] = table.concat(classes, '/')
+                return groupRoles.classCache[name]
+            end
+        end
+    end
+    return nil
+end
+
+function groupRoles.memberClass(name)
+    local class = ''
+    local ok, saved = pcall(groupRoles.savedClasses, name)
+    if ok and saved then return saved end
+    pcall(function() class = tostring(mq.TLO.Group.Member(name).Class.ShortName() or '') end)
+    return class
+end
+
+function groupRoles.canHeal(classes)
+    for class in tostring(classes or ''):gmatch('%a+') do
+        if groupRoles.healers[class:lower()] then return true end
+    end
+    return false
+end
+
+-- What each character is told. Triune hangs assisting, chasing and Tank spell targets off each
+-- box's Main Assist, so the roles form a chain that ends at the Puller, who finds the targets.
+function groupRoles.plan()
+    local tank, assist, puller = groupRoles.names()
+    local plan = {}
+    for _, name in ipairs(groupNames()) do
+        local lower = name:lower()
+        local row = {
+            name = name, class = groupRoles.memberClass(name), mode = 'assist chase', assist = assist,
+            isTank = lower == tank:lower(), isAssist = lower == assist:lower(), isPuller = lower == puller:lower(),
+        }
+        if row.isPuller then
+            row.mode = 'puller hunt'
+            row.assist = row.isTank and assist or tank
+        elseif row.isAssist then
+            row.assist = puller
+        elseif not row.isTank and groupRoles.canHeal(row.class) then
+            row.assist = tank
+        end
+        plan[#plan + 1] = row
+    end
+    return plan
+end
+
+function groupRoles.sendTo(name, command)
+    if name:lower() == tostring(mq.TLO.Me.CleanName() or ''):lower() then
+        mq.cmd('/ac ' .. command)
+    else
+        mq.cmd('/ac net ' .. name .. ' ' .. command)
+    end
+end
+
+function groupRoles.sendToOthers(command)
+    local names = groupNames()
+    for index = 2, #names do mq.cmd('/ac net ' .. names[index] .. ' ' .. command) end
+end
+
+-- force sends every row, as on dungeon entry. Otherwise only rows that changed are sent, which also
+-- catches a healer whose class could not be read until it zoned in.
+function groupRoles.apply(force)
+    local tankRow
+    for _, row in ipairs(groupRoles.plan()) do
+        local signature = row.assist .. '|' .. row.mode
+        if force or groupRoles.applied[row.name] ~= signature then
+            groupRoles.sendTo(row.name, 'ma ' .. row.assist)
+            groupRoles.sendTo(row.name, row.mode)
+            groupRoles.applied[row.name] = signature
+        end
+        if row.isTank then tankRow = row end
+    end
+    -- Triune's default keeps an Assist-mode box moving behind the mob, which a tank must not do.
+    local behindOff = tankRow and tankRow.mode == 'assist chase' and tankRow.name or ''
+    if behindOff ~= groupRoles.behindOff then
+        if groupRoles.behindOff ~= '' then groupRoles.sendTo(groupRoles.behindOff, 'behind on') end
+        if behindOff ~= '' then groupRoles.sendTo(behindOff, 'behind off') end
+        groupRoles.behindOff = behindOff
+        saveSettings()
+    end
+end
+
+-- Runs on the main loop for the window's Apply button and /ldon roles apply.
+function groupRoles.applyNow()
+    local issue = groupRoles.issues()[1]
+    if issue then
+        groupRoles.status = issue .. ' Roles were not sent.'
+    elseif tostring(mq.TLO.Lua.Script('triune').Status() or '') ~= 'RUNNING' then
+        groupRoles.status = 'Triune is not running, so roles were not sent. Start it with /lua run triune.'
+    else
+        groupRoles.apply(true)
+        groupRoles.status = 'Roles sent. ' .. groupRoles.summary()
+    end
+    saveSettings()
+    echo(groupRoles.status)
+end
+
 -- MQ2Nav helpers and saved pathable positions used for safe mesh recovery.
+local shrinkOnZone
+
 local function navigationActive()
     local activeNavigation = false
     local ok = pcall(function() activeNavigation = mq.TLO.Navigation.Active() == true end)
@@ -553,6 +752,7 @@ local function waitForZoneChange(previousZone, timeoutSeconds)
 end
 
 local function navToLocation(y, x, z, arrivalDistance, timeoutSeconds, ignoreArrivalZ)
+    if shrinkOnZone and not shrinkOnZone() then return false end
     local startY = tonumber(mq.TLO.Me.Y()) or 0
     local startX = tonumber(mq.TLO.Me.X()) or 0
     local startZ = tonumber(mq.TLO.Me.Z()) or 0
@@ -591,6 +791,7 @@ local function navToLocation(y, x, z, arrivalDistance, timeoutSeconds, ignoreArr
 end
 
 local function navToSpawn(name, arrivalDistance)
+    if shrinkOnZone and not shrinkOnZone() then return false end
     local range = arrivalDistance or 35
     local spawn = mq.TLO.Spawn('npc ' .. name)
     local id = tonumber(spawn.ID()) or 0
@@ -698,6 +899,7 @@ local function sampleMeshRecoveryPoint(zone)
 end
 
 local function navToRoutePoint(y, x, z, startZone)
+    if shrinkOnZone and not shrinkOnZone() then return false end
     if z then
         mq.cmdf('/nav locyxz %.2f %.2f %.2f', y, x, z)
     else
@@ -829,6 +1031,7 @@ local function travelAcrossZones(path)
             end
             if not crossed then return false end
             mq.delay(5000)
+            if shrinkOnZone and not shrinkOnZone() then return false end
         end
     end
     return true
@@ -930,7 +1133,8 @@ local function refreshMissionOptions()
         return false
     end
     local combo = mq.TLO.Window('AdventureRequestWnd').Child('AdvRqst_TypeCombobox')
-    for index = 1, 10 do
+    -- Only the first five entries are offered, whatever else the client lists.
+    for index = 1, 5 do
         local ok, value = pcall(function() return combo.List(index)() end)
         if not ok then
             echo('Could not read the game mission-type list; retaining the previous choices. No task will be requested.')
@@ -954,33 +1158,20 @@ local function refreshMissionOptions()
     return true
 end
 
-local function validateController(mainAssist)
-    local me = tostring(mq.TLO.Me.CleanName() or '')
-    local groupSize = tonumber(mq.TLO.Group()) or 0
-    if groupSize > 0 and tostring(mq.TLO.Group.Leader.Name() or ''):lower() ~= me:lower() then
-        echo('The local character must be group leader to run the mission controller.')
-        return false
-    end
-    local selected = tostring(mainAssist or me):lower()
-    local selectedFound = selected == me:lower()
-    for index = 1, groupSize do
-        local name = tostring(mq.TLO.Group.Member(index).Name() or '')
-        if name:lower() == selected then selectedFound = true; break end
-    end
-    if not selectedFound then
-        echo('The selected Main Assist is not a member of this group.')
-        return false
-    end
-    return true
+-- The character that presses Start runs the mission. Native group leader data is not used.
+local function validateController()
+    local issue = groupRoles.issues()[1]
+    if not issue then return true end
+    echo(issue .. ' Fix it in Group roles, then resume.')
+    return false
 end
 
 local function configureGroupTravel()
-    local me = tostring(mq.TLO.Me.CleanName() or '')
-    if not validateController(me) then return false end
+    if not validateController() then return false end
     local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
     if tostring(mq.TLO.Lua.Script('triune').Status() or '') == 'RUNNING' then
         mq.cmd('/ac pause')
-        if grouped then mq.cmd('/ac net group pause') end
+        if grouped then groupRoles.sendToOthers('pause') end
     end
     travelReady = true
     echo(grouped
@@ -991,8 +1182,14 @@ end
 
 local function shrinkGroupOnEntry()
     local zone = zoneId()
-    if not shrinkOnEntry or shrinkAttemptZone == zone then return active end
+    if not active then return false end
+    if remoteReturning or not shrinkOnEntry or shrinkAttemptZone == zone then return active end
     shrinkAttemptZone = zone
+    -- Combat is already set up here, so a pause would never be resumed.
+    if combatZone == zone then
+        echo('Combat is already running in this zone; shrink will start from the next zone.')
+        return active
+    end
     if not luaFileExists('ldon_shrink.lua') then
         echo('Shrink helper ldon_shrink.lua is missing; continuing without shrink.')
         return active
@@ -1002,17 +1199,23 @@ local function shrinkGroupOnEntry()
         echo('Could not load shrink helper: ' .. tostring(shrink) .. '. Continuing without shrink.')
         return active
     end
+    if DUNGEONS[zone] then ensureTriune() end
+    local triuneRunning = tostring(mq.TLO.Lua.Script('triune').Status() or '') == 'RUNNING'
     local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
-    mq.cmd('/ac pause')
+    local dispatch = grouped and triuneRunning
+    if triuneRunning then mq.cmd('/ac pause') end
     local expectedZone = tonumber(mq.TLO.Zone.ID())
     local started = mq.gettime()
-    if grouped then
-        mq.cmd('/ac net group pause')
-        mq.cmdf('/ac net group /lua run ldon_shrink %d', expectedZone)
+    if grouped and not triuneRunning then
+        echo('Triune is not running, so group boxes were not sent a shrink in this zone.')
+    end
+    if dispatch then
+        groupRoles.sendToOthers('pause')
+        groupRoles.sendToOthers(string.format('/lua run ldon_shrink %d', expectedZone))
         echo('Shrink sent to group boxes; BoxNet and slash-command acceptance are required on each box. Remote completion is not confirmed by this runner.')
     end
     shrink(expectedZone, function() return active and zoneId() == zone end)
-    if grouped then
+    if dispatch then
         -- Remote helpers allow 15 seconds for zoning and 10 for the click.
         while active and zoneId() == zone and mq.gettime() - started < 27000 do
             mq.doevents()
@@ -1022,36 +1225,50 @@ local function shrinkGroupOnEntry()
     return active and zoneId() == zone
 end
 
-local function configureGroupCombat()
-    local me = tostring(mq.TLO.Me.CleanName() or '')
-    local selected = mainAssistName ~= '' and mainAssistName or me
-    if not validateController(selected) then return false end
-    if not ensureTriune() then return false end
-    local _, completed = assignmentState()
-    if not completed and not shrinkGroupOnEntry() then return false end
+shrinkOnZone = shrinkGroupOnEntry
 
-    mq.cmd('/ac ma ' .. selected)
-    local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
-    if grouped then
-        mq.cmd('/ac net group ma ' .. selected)
-        mq.cmd('/ac net group assist chase')
+local function configureGroupCombat()
+    if not validateController() then return false end
+    if not ensureTriune() then return false end
+    if not shrinkGroupOnEntry() then return false end
+    local zone = zoneId()
+    local _, completed = assignmentState()
+    if not completed then
+        groupRoles.waitForGroupInZone(zone)
+        if not active then return false end
     end
-    mq.cmd('/ac puller hunt')
-    if selected:lower() ~= me:lower() then
-        mq.cmd('/ac net ' .. selected .. ' puller hunt')
+    if zoneShortName() == 'gukd' and entryPositionZone ~= zone and not completed then
+        stopSwarmPull(false)
+        mq.cmd('/ac pause')
+        if (tonumber(mq.TLO.Group()) or 0) > 0 then mq.cmd('/ac net group pause') end
+        echo('Mushroom Grove: moving clear of the zone-in door before enabling combat.')
+        for _, point in ipairs({
+            { 140.38, -790.08, -25.96 },
+            { 151.44, -754.05, -25.96 },
+        }) do
+            local reached = navToLocation(point[1], point[2], point[3], 5, 60)
+            if not active or zoneId() ~= zone or not reached then
+                mq.cmd('/nav stop')
+                echo('Could not complete the Mushroom Grove zone-in approach; combat remains paused.')
+                return false
+            end
+        end
+        entryPositionZone = zone
     end
+
+    groupRoles.apply(true)
     mq.cmd('/ac run')
-    if grouped then mq.cmd('/ac net group run') end
+    groupRoles.sendToOthers('run')
     combatRunStartedAt = mq.gettime()
     combatRunSends = 1
     combatZone = zoneId()
     startLongBuffs()
     startSwarmPull()
-    echo(grouped and
-        'Group leader set to Puller (Hunt); ' .. selected .. ' is the Main Assist' ..
-            (selected:lower() ~= me:lower() and ' and also set to Puller (Hunt)' or '') ..
-            '; remaining boxes set to Assist (Chase).' or
-        'Solo Triune Hunt mode set for ' .. selected .. '.')
+    local tank, assist, puller = groupRoles.names()
+    echo((tonumber(mq.TLO.Group()) or 0) > 0 and
+        string.format('Group roles set: Main Tank %s, Main Assist %s, Puller %s (Hunt); other boxes Assist (Chase).',
+            tank, assist, puller) or
+        'Solo Triune Hunt mode set for ' .. assist .. '.')
     return true
 end
 
@@ -1124,7 +1341,7 @@ local function recoverFromMeshIsolation()
     end
     local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
     mq.cmd('/ac pause')
-    if grouped then mq.cmd('/ac net group pause') end
+    if grouped then groupRoles.sendToOthers('pause') end
     if mq.TLO.Plugin('MQ2Nav').IsLoaded() ~= true
         or mq.TLO.Plugin('MQ2MoveUtils').IsLoaded() ~= true then
         echo('Automatic mesh recovery requires both MQ2Nav and MQ2MoveUtils; TAC remains paused.')
@@ -1218,13 +1435,6 @@ end
 local breakInvisibilityForInteraction
 
 local function requestTask(hub, requestedMissionType)
-    local me = tostring(mq.TLO.Me.CleanName() or '')
-    local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
-    local leader = grouped and tostring(mq.TLO.Group.Leader.Name() or '') or me
-    if grouped and (leader == '' or leader:lower() ~= me:lower()) then
-        echo('You must be the group leader before requesting an LDoN task.')
-        return false
-    end
     if not breakInvisibilityForInteraction('the Adventure Recruiter') then return false end
     if not navToSpawn(hub.recruiter, 10) then return false end
     local recruiter = mq.TLO.Spawn('npc ' .. hub.recruiter)
@@ -1278,6 +1488,7 @@ local function requestTask(hub, requestedMissionType)
         return false
     end
     adventureCompleted = false
+    groupRoles.adventureFailed, groupRoles.unassignedSince = false, nil
     mq.cmd('/notify AdventureRequestWnd AdvRqst_AcceptButton leftmouseup')
     mq.delay(1500)
     mq.cmd('/target clear')
@@ -1402,6 +1613,7 @@ breakInvisibilityForInteraction = function(destination)
 end
 
 function useMagus(destination, magusName)
+    if shrinkOnZone and not shrinkOnZone() then return false end
     local interactionRange = 10
     local startZone = zoneId()
     local magus = mq.TLO.Spawn('npc ' .. (magusName or MAGUS_NAMES_BY_ZONE[startZone] or 'Magus'))
@@ -1618,14 +1830,13 @@ local function enterTask(_, dialogue)
     local entrance
     if homeHubZone == 392 then
         entrance = {
-            zone = 'nro', switch = 0, nearby = true, recordingKey = 'switch_nro_3',
-            waypoints = { { 5562.44, -1183.15, 25.01 } },
+            zone = 'nro', switch = 0, door = 'TAKPORTAL700', recordingKey = 'switch_nro_3',
         }
     elseif homeHubZone == 408 then
         if zoneId() == 408 and not useMagus('South Ro') then return false end
         entrance = {
-            zone = 'sro', switch = 0, door = 'OBJ_ZONEBOX', recordingKey = 'switch_sro_1',
-            waypoints = { { 5, -222, 129.58 } },
+            zone = 'sro', approachSpawn = 'Scout_Miigle',
+            switch = 0, door = 'RUJPORTAL701', recordingKey = 'switch_sro_1',
         }
     elseif homeHubZone == 393 then
         local function mentions(...)
@@ -1634,54 +1845,51 @@ local function enterTask(_, dialogue)
             end
             return false
         end
-        if mentions('barricaded door', 'guk portal', 'root garden') then
+        local guess = not mentions('barricaded door', 'guk portal', 'root garden', 'guktop',
+            'cauldron of lost souls', 'rotting tree trunk', 'tree trunk', 'innothule')
+            and groupRoles.guessEntrance(text, { 'the Guktop door', 'the Innothule tree trunk' })
+        if guess == 1 or mentions('barricaded door', 'guk portal', 'root garden', 'guktop') then
             entrance = {
                 zone = 'guktop', switch = 0, door = 'GKPORTAL701', path = {'innothule', 'guktop'},
                 waypoints = { { 441.77, 228.63, -9.13 } },
             }
-        elseif mentions('cauldron of lost souls', 'rotting tree trunk', 'tree trunk', 'innothule') then
-            entrance = {
-                zone = 'innothule', switch = 0, nearby = true, path = {'innothule'},
-                waypoints = { { 1389.12, 1145.40, -15.62 }, { 1245.50, 1186.58, -10.49 } },
-            }
         else
-            echo('Unrecognized Deepest Guk entrance directions; not choosing an entrance: ' .. dialogue)
-            return false
+            entrance = {
+                -- Enter the log at an angle using the owner's two points, then click from there.
+                -- The door's listed position is about 100 units away, so never walk toward it.
+                zone = 'innothule', switch = 0, door = 'GKPORTAL700', clickInPlace = true, arrival = 12,
+                -- /nav ends on top of the log at about Z -0.6, where the click does not zone, so
+                -- only the first point uses it. The last leg walks straight in along the same angle.
+                path = {'innothule'}, walkIn = { 1253.06, 1188.59, -8.99 },
+                waypoints = { { 1389.12, 1145.40, -15.62 } },
+            }
         end
     elseif homeHubZone == 68 then
-        if text:find('unearthed grave', 1, true) then
-            entrance = {
-                zone = 'lfaydark', switch = 0, nearby = true,
-                path = {'gfaydark', 'lfaydark'},
-                waypoints = { { -67, 3843 } },
-            }
-        elseif text:find('crypt', 1, true) then
-            entrance = {
-                zone = 'lfaydark', switch = 0, door = 'MISTFCFN700', path = {'gfaydark', 'lfaydark'},
-                waypoints = {
-                    { -739.37, 3793.22, 1.06 },
-                    { -760.27, 3838.85, 0, ignoreArrivalZ = true },
-                },
-            }
+        local guess = not text:find('grave', 1, true) and not text:find('crypt', 1, true)
+            and groupRoles.guessEntrance(text, { 'the crypt', 'the grave' })
+        if guess == 2 or text:find('grave', 1, true) then
+            entrance = { zone = 'lfaydark', switch = 10, path = {'gfaydark', 'lfaydark'} }
         else
-            echo('Unrecognized Mistmoore entrance directions; not choosing an entrance: ' .. dialogue)
-            return false
+            entrance = { zone = 'lfaydark', switch = 7, path = {'gfaydark', 'lfaydark'} }
         end
     elseif homeHubZone == 30 then
         -- Locations are /loc order (Y, X, Z). Everfrost has two distinct entrances.
-        if text:find('snowy mine', 1, true) then
+        local guess = not text:find('snowy mine', 1, true) and not text:find('portal', 1, true)
+            and groupRoles.guessEntrance(text, { 'the snowy mine', 'the portal' })
+        if guess == 1 or text:find('snowy mine', 1, true) then
             entrance = {
                 zone = 'everfrost', switch = 0, mine = true, nearby = true,
-                waypoints = { { 2697.18, -4694.15, -91.06 }, { 2771.57, -4725.96, -104 } },
-            }
-        elseif text:find('portal', 1, true) then
-            entrance = {
-                zone = 'everfrost', switch = 0, portal = true, door = 'MIRPORTAL700',
-                waypoints = { { -974.81, -5435.43, 153.51 }, { -829.68, -5459.88, 192.99 } },
+                waypoints = {
+                    { 2698.93, -4693.65, -95.64 },
+                    { 2751.72, -4645.75, -84.40 },
+                    { 2772.53, -4727.61, -97.37 },
+                },
             }
         else
-            echo('Unrecognized Everfrost entrance directions; not choosing an entrance: ' .. dialogue)
-            return false
+            entrance = {
+                zone = 'everfrost', switch = 0, portal = true,
+                waypoints = { { -974.81, -5435.43, 153.51, ignoreArrivalZ = true }, { -829.68, -5459.88, 192.99 } },
+            }
         end
     end
 
@@ -1689,20 +1897,35 @@ local function enterTask(_, dialogue)
         echo('No entrance route is configured for the selected camp.')
         return false
     end
+    if zoneShortName() == 'guktop' and entrance.zone == 'innothule' then
+        echo('The tree trunk entrance is in Innothule; walking back there from Guktop.')
+        if not returnToHub() then return false end
+        mq.delay(5000)
+    end
     if entrance.path and zoneShortName() ~= entrance.zone and not travelAcrossZones(entrance.path) then return false end
     if zoneShortName() ~= entrance.zone then
         echo('Expected entrance zone ' .. entrance.zone .. ', but arrived in ' .. zoneShortName() .. '.')
         return false
     end
     if entrance.approachSpawn and not navToSpawn(entrance.approachSpawn) then
-        echo('Could not reach the recorded zone-line approach NPC "' .. entrance.approachSpawn .. '".')
-        return false
+        if not active or not entrance.door then
+            echo('Could not reach the recorded zone-line approach NPC "' .. entrance.approachSpawn .. '".')
+            return false
+        end
+        echo('Could not reach "' .. entrance.approachSpawn .. '"; going straight to the entrance instead.')
     end
     if entrance.waypoints then
         for index, point in ipairs(entrance.waypoints) do
             local before = zoneId()
-            local arrival = entrance.mine and index == #entrance.waypoints and 10 or 3
+            local arrival = entrance.arrival or (entrance.mine and index == #entrance.waypoints and 10 or 3)
             local reached = navToLocation(point[1], point[2], point[3], arrival, 60, point.ignoreArrivalZ)
+            if not reached and not entrance.mine and not entrance.portal then
+                reached = groupRoles.recoverPoint(point, arrival, before)
+                if not reached and active and zoneId() == before and index < #entrance.waypoints then
+                    echo('Skipping an approach point that could not be reached; going on to the next one.')
+                    reached = true
+                end
+            end
             if not reached and entrance.mine and index == #entrance.waypoints
                 and active and zoneId() == before
                 and distance3DTo(point[1], point[2], point[3]) <= 35
@@ -1746,6 +1969,102 @@ local function enterTask(_, dialogue)
             end
         end
     end
+    if entrance.portal then
+        local before = zoneId()
+        -- Walking in does not trigger this portal, so click the nearest door object instead.
+        local function nearestDoor()
+            mq.cmd('/doortarget')
+            mq.delay(300)
+            local id = tonumber(mq.TLO.DoorTarget.ID()) or 0
+            local distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
+            return id, distance, tostring(mq.TLO.DoorTarget.Name() or '?')
+        end
+        local doorId, distance, doorName = nearestDoor()
+        echo(string.format('Portal check: nearest door %s (id %d) is %.0f units away.', doorName, doorId, distance))
+        if doorId ~= 0 and distance > 15 and distance <= 40 then
+            local doorY = tonumber(mq.TLO.DoorTarget.Y())
+            local doorX = tonumber(mq.TLO.DoorTarget.X())
+            if doorY and doorX then
+                mq.cmdf('/moveto loc %.2f %.2f', doorY, doorX)
+                for _ = 1, 24 do
+                    mq.delay(250)
+                    mq.cmdf('/doortarget id %d', doorId)
+                    distance = tonumber(mq.TLO.DoorTarget.Distance()) or math.huge
+                    if distance <= 10 then break end
+                end
+                mq.cmd('/moveto off')
+            end
+        end
+        if doorId ~= 0 and distance <= 15 then
+            mq.cmdf('/doortarget id %d', doorId)
+            mq.cmd('/face fast door')
+            mq.delay(300)
+            mq.cmd('/click left door')
+            if waitForZoneChange(before, 15) then return true end
+        elseif waitForZoneChange(before, 5) then
+            return true
+        end
+        echo(string.format('Standing at %.2f, %.2f, %.2f; nearest door %s (id %d) at %.0f units. Send this to the developer.',
+            tonumber(mq.TLO.Me.Y()) or 0, tonumber(mq.TLO.Me.X()) or 0, tonumber(mq.TLO.Me.Z()) or 0,
+            doorName, doorId, distance))
+        return false
+    end
+    if entrance.clickInPlace then
+        local before = zoneId()
+        mq.cmd('/nav stop')
+        if entrance.walkIn then
+            local spot, first = entrance.walkIn, entrance.waypoints[1]
+            local inside = false
+            for try = 1, 2 do
+                mq.cmdf('/moveto loc %.2f %.2f', spot[1], spot[2])
+                for _ = 1, 60 do
+                    mq.doevents()
+                    if not active then mq.cmd('/moveto off'); return false end
+                    if zoneId() ~= before then break end
+                    if distance3DTo(spot[1], spot[2], spot[3]) <= 6 then inside = true; break end
+                    mq.delay(250)
+                end
+                mq.cmd('/moveto off')
+                if inside or zoneId() ~= before then break end
+                if try == 1 then
+                    echo('Did not get inside the log; going back to the first point to try again.')
+                    navToLocation(first[1], first[2], first[3], entrance.arrival, 60)
+                end
+            end
+            if zoneId() ~= before then
+                local dungeon = DUNGEONS[zoneId()]
+                return dungeon ~= nil and dungeon.family == HUBS[homeHubZone].family
+            end
+            if not inside then
+                echo(string.format('Could not get inside the log; stopped at %.2f, %.2f, %.2f. Clicking anyway.',
+                    tonumber(mq.TLO.Me.Y()) or 0, tonumber(mq.TLO.Me.X()) or 0, tonumber(mq.TLO.Me.Z()) or 0))
+            end
+        end
+        for _ = 1, 3 do
+            if zoneId() ~= before then return true end
+            mq.cmd('/doortarget ' .. entrance.door)
+            mq.delay(300)
+            if tostring(mq.TLO.DoorTarget.Name() or ''):lower() ~= entrance.door:lower() then
+                echo('Could not target the entrance "' .. entrance.door .. '".')
+                return false
+            end
+            mq.cmd('/face fast door')
+            mq.delay(300)
+            mq.cmd('/click left door')
+            for _ = 1, 40 do
+                mq.doevents()
+                if not active then return false end
+                if zoneId() ~= before then
+                    mq.delay(1500)
+                    echo('Zoned into ' .. zoneShortName() .. '.')
+                    return true
+                end
+                mq.delay(250)
+            end
+        end
+        echo('Clicked "' .. entrance.door .. '" three times without zoning.')
+        return false
+    end
     if entrance.nearby then
         mq.cmd('/doortarget')
         mq.delay(300)
@@ -1784,6 +2103,52 @@ local function waitUntilSafeToExit()
     end
     echo('Task is complete, but combat or an XTarget remained active for five minutes. Not clicking the exit.')
     return false
+end
+
+local ZONE_CAMPS = { [392] = 392, [408] = 408, [393] = 393, [413] = 393, [65] = 393,
+    [68] = 68, [54] = 68, [57] = 68, [30] = 30 }
+
+-- Rujarkian's entrance is in South Ro, so South Ro is not the wrong place for it.
+function groupRoles.campOfZone(zone)
+    return ZONE_CAMPS[zone]
+end
+
+function groupRoles.wrongCamp(zone, hub)
+    local camp = ZONE_CAMPS[zone]
+    if not camp or camp == hub then return false end
+    return not (hub == 408 and zone == 393)
+end
+
+-- For directions naming no known entrance: warns, then tries each entrance on successive attempts.
+function groupRoles.guessEntrance(text, names)
+    if groupRoles.guessText ~= text then groupRoles.guessText, groupRoles.guessCount, groupRoles.guessWon = text, 0, false end
+    if not groupRoles.guessWon then groupRoles.guessCount = groupRoles.guessCount + 1 end
+    local choice = (groupRoles.guessCount - 1) % #names + 1
+    echo('Warning: the directions name no known entrance, so trying ' .. names[choice] .. '. Directions: ' .. text)
+    return choice
+end
+
+-- After /nav fails: try /nav once more, then walk straight if the point is close and MoveUtils is loaded.
+function groupRoles.recoverPoint(point, arrival, before)
+    if not active or zoneId() ~= before then return false end
+    echo('Navigation to the approach point failed; trying again.')
+    mq.cmd('/nav stop')
+    if navToLocation(point[1], point[2], point[3], arrival, 60, point.ignoreArrivalZ) then return true end
+    if not active or zoneId() ~= before or distance3DTo(point[1], point[2], point[3]) > 60
+        or mq.TLO.Plugin('MQ2MoveUtils').IsLoaded() ~= true then
+        return false
+    end
+    echo('Still no route; walking straight to the approach point.')
+    mq.cmd('/nav stop')
+    mq.cmdf('/moveto loc %.2f %.2f', point[1], point[2])
+    local near = math.max(arrival, 12)
+    for _ = 1, 40 do
+        mq.doevents()
+        if not active or zoneId() ~= before or distance3DTo(point[1], point[2], point[3]) <= near then break end
+        mq.delay(250)
+    end
+    mq.cmd('/moveto off')
+    return active and distance3DTo(point[1], point[2], point[3]) <= near
 end
 
 local function waitForCondition(timeoutMs, predicate)
@@ -1962,7 +2327,7 @@ local function groupMembersAtRecruiter()
         local name = names[index]
         local distance = math.huge
         pcall(function()
-            local member = mq.TLO.Spawn('pc ' .. name)
+            local member = mq.TLO.Spawn('pc =' .. name)
             if member and member() then distance = tonumber(member.Distance3D()) or math.huge end
         end)
         if distance > 40 then missing[#missing + 1] = name end
@@ -1978,9 +2343,9 @@ local function returnGroupToCampaignRecruiter()
     end
 
     echo('Starting Bazaar and Back return for the group; BoxNet peers will meet at the campaign recruiter.')
-    mq.cmd('/ac net group /lua run LDON_Triune')
+    groupRoles.sendToOthers('/lua run LDON_Triune')
     mq.delay(3000)
-    mq.cmdf('/ac net group /ldon remote-return %d', hubZone)
+    groupRoles.sendToOthers(string.format('/ldon remote-return %d', hubZone))
 
     if not returnToCampaignRecruiter(hubZone) then
         echo('Could not return the controller to the campaign recruiter; runner paused.')
@@ -2012,8 +2377,120 @@ local function exitTask(zone)
         echo('Bazaar and Back did not complete; using the dungeon exit and existing return route.')
         return returnToCampaignRecruiter(homeHubZone)
     end
-    mq.cmd('/ac net group pause')
+    mq.cmd('/ac pause')
+    groupRoles.sendToOthers('pause')
     return returnGroupToCampaignRecruiter()
+end
+
+-- Group entry. Each box follows the leader with MQ2AdvPath's /afollow. AdvPath clears a follow on
+-- every zone change and the leader's spawn ID changes too, so the box reissues it. A box left behind
+-- falls back to the leader's entrance route (enterTask, unchanged), using the leader's directions
+-- because a box's Adventure window may not show them.
+function groupRoles.sendGroupEntry(dialogue)
+    if groupRoles.entrySent or (tonumber(mq.TLO.Group()) or 0) == 0 then return end
+    groupRoles.entrySent = true
+    local directions = tostring(dialogue or ''):lower():gsub('[^%w ]', ' ')
+    directions = directions:gsub('%s+', ' ')
+    echo('Sending the group to the dungeon entrance.')
+    local order = string.format('remote-follow %s %d %s',
+        tostring(mq.TLO.Me.CleanName() or ''), homeHubZone, directions:sub(1, 400))
+    -- A box that is not running the script gets the order as launch arguments, so a slow start cannot
+    -- lose it. A box already running ignores the launch and takes the /ldon line, which is safe to repeat.
+    groupRoles.sendToOthers('/lua run LDON_Triune ' .. order)
+    mq.delay(3000)
+    groupRoles.sendToOthers('/ldon ' .. order)
+end
+
+-- Runs on a box's main loop about once a second while it has a follow order.
+function groupRoles.followTick()
+    local now = mq.gettime()
+    if now - (groupRoles.followCheckedAt or 0) < 1000 then return end
+    groupRoles.followCheckedAt = now
+    local leader = groupRoles.followName
+    if DUNGEONS[zoneId()] then
+        mq.cmd('/afollow off')
+        groupRoles.followName, groupRoles.followId, groupRoles.followLostAt = nil, nil, nil
+        echo('Follow ended: this character is in the dungeon.')
+        return
+    end
+    local id = 0
+    pcall(function() id = tonumber(mq.TLO.Spawn('pc =' .. leader).ID()) or 0 end)
+    if id > 0 then
+        groupRoles.followLostAt = nil
+        local following = false
+        pcall(function() following = mq.TLO.AdvPath.Following() == true end)
+        if id ~= groupRoles.followId or not following then
+            mq.cmdf('/afollow spawn %d', id)
+            groupRoles.followId = id
+        end
+        return
+    end
+    groupRoles.followLostAt = groupRoles.followLostAt or now
+    if now - groupRoles.followLostAt >= 20000 then
+        echo('Lost ' .. leader .. ' for 20 seconds; taking the entrance route.')
+        mq.cmd('/afollow off')
+        groupRoles.enterHub, groupRoles.enterText = groupRoles.followHub, groupRoles.followText
+        groupRoles.followName, groupRoles.followId, groupRoles.followLostAt = nil, nil, nil
+    end
+end
+
+-- Runs on a box's main loop, so /ldon pause can still interrupt it through mq.doevents.
+function groupRoles.runRemoteEntry()
+    local hub, directions = groupRoles.enterHub, groupRoles.enterText or ''
+    groupRoles.enterHub, groupRoles.enterText = nil, nil
+    if DUNGEONS[zoneId()] then return end
+    if not mq.TLO.Window('AdventureRequestWnd').Open() then
+        mq.cmd('/windowstate AdventureRequestWnd open')
+        mq.delay(500)
+    end
+    local assigned, completed, dialogue = assignmentState()
+    if not assigned or completed then
+        echo('Remote entry skipped: this character has no active adventure.')
+        return
+    end
+    local wasActive = active
+    active = true
+    remoteReturning = true
+    homeHubZone = hub
+    local entered = true
+    local zone = zoneId()
+    if not ENTRY_ZONES[zone] or (HUBS[zone] and zone ~= hub) then
+        entered = returnToCampaignRecruiter(hub)
+    end
+    if entered then
+        for attempt = 1, 3 do
+            entered = enterTask(zoneId(), directions ~= '' and directions or dialogue)
+            if entered or not active then break end
+            if attempt < 3 then mq.delay(15000, function() return not active end) end
+        end
+    end
+    remoteReturning = false
+    active = wasActive
+    echo(entered and 'Remote entry reached the dungeon.' or 'Remote entry did not reach the dungeon.')
+end
+
+-- The leader holds combat setup so a run command does not interrupt a box still walking to the door.
+function groupRoles.waitForGroupInZone(zone)
+    if not groupRoles.entrySent or groupRoles.entryWaited then return end
+    groupRoles.entryWaited = true
+    local function missing()
+        local absent = {}
+        local names = groupNames()
+        for index = 2, #names do
+            local id = 0
+            pcall(function() id = tonumber(mq.TLO.Spawn('pc =' .. names[index]).ID()) or 0 end)
+            if id == 0 then absent[#absent + 1] = names[index] end
+        end
+        return absent
+    end
+    echo('Waiting up to two minutes for the group to enter the dungeon before starting combat.')
+    for _ = 1, 480 do
+        mq.doevents()
+        if not active or zoneId() ~= zone or mq.TLO.Me.Combat() == true or #missing() == 0 then break end
+        mq.delay(250)
+    end
+    local absent = missing()
+    if #absent > 0 then echo('Starting without: ' .. table.concat(absent, ', ')) end
 end
 
 -- Validate required movement support before starting or resuming a campaign.
@@ -2043,14 +2520,10 @@ local function beginCampaign()
         local assigned, completed, dialogue = assignmentState()
         local assignmentHub = assigned and not completed and hubFromAssignment(dialogue) or nil
         if assigned and not completed and not assignmentHub then
-            if DUNGEONS[zoneId()] then
-                selectHomeHub()
-                assignmentHub = homeHubZone ~= 0 and homeHubZone or nil
-            end
-            if not assignmentHub then
-                echo('Could not determine the camp for the active adventure. Open its directions before starting.')
-                return false
-            end
+            selectHomeHub()
+            assignmentHub = homeHubZone ~= 0 and homeHubZone or campaignPlan[first].hubZone
+            echo('Warning: the mission text names no known camp, so using ' .. HUBS[assignmentHub].name ..
+                '. Mission text: ' .. tostring(dialogue))
         end
         local startHub = assignmentHub or campaignPlan[first].hubZone
         local returnBeforeCampChange = false
@@ -2064,6 +2537,14 @@ local function beginCampaign()
         end
         homeHubZone = startHub
         campaignLegIndex = first
+        -- An adventure already under way counts toward its own camp's row when that row has runs.
+        for index, leg in ipairs(campaignPlan) do
+            if assignmentHub and leg.hubZone == assignmentHub and (leg.count or 0) > 0 then
+                campaignLegIndex = index
+                break
+            end
+        end
+        groupRoles.adventureFailed, groupRoles.unassignedSince = false, nil
         campaignCompleted = {}
         for index = 1, #campaignPlan do campaignCompleted[index] = 0 end
         campaignTaskCounted = false
@@ -2109,6 +2590,11 @@ local function startRunner()
         end
     end
     if not beginCampaign() then return false end
+    local nativeLeader = tostring(mq.TLO.Group.Leader.Name() or '')
+    if (tonumber(mq.TLO.Group()) or 0) > 0 and nativeLeader ~= ''
+        and nativeLeader:lower() ~= tostring(mq.TLO.Me.CleanName() or ''):lower() then
+        echo('Warning: ' .. nativeLeader .. ' is the group leader, but this character is running the mission. Continuing.')
+    end
     local zone = zoneId()
     if not HUBS[zone] and not ENTRY_ZONES[zone] and not DUNGEONS[zone] then
         echo('You are not in an LDoN zone. The runner will travel to ' .. HUBS[homeHubZone].name ..
@@ -2150,6 +2636,7 @@ end
 
 -- Returns the runner and window to the idle state so a new run can begin without a restart.
 local function finishCampaign(message)
+    groupRoles.adventureFailed, groupRoles.unassignedSince = false, nil
     active = false
     campaignInitialized = false
     campaignStopPending = false
@@ -2166,7 +2653,7 @@ local function finishCampaign(message)
     stopSwarmPull(false)
     mq.cmd('/nav stop')
     mq.cmd('/ac pause')
-    if (tonumber(mq.TLO.Group()) or 0) > 0 then mq.cmd('/ac net group pause') end
+    groupRoles.sendToOthers('pause')
     saveSettings()
     echo(message)
 end
@@ -2221,23 +2708,6 @@ local function status()
         campaignLeg() and campaignLeg().count or 0))
 end
 
-local function groupNames()
-    local names = { tostring(mq.TLO.Me.CleanName() or '') }
-    local count = tonumber(mq.TLO.Group()) or 0
-    for index = 1, count do
-        local name = tostring(mq.TLO.Group.Member(index).Name() or '')
-        if name ~= '' then names[#names + 1] = name end
-    end
-    return names
-end
-
-local function selectedAssistIndex(names)
-    for index, name in ipairs(names) do
-        if name:lower() == mainAssistName:lower() then return index end
-    end
-    return 1
-end
-
 -- Preflight checklist, run summary, and diagnostics text for the window and /ldon commands.
 local CAMP_MESH_ZONES = {
     [392] = { 'nro' },
@@ -2258,6 +2728,7 @@ local function runPreflight()
     local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
     if grouped then
         check(pluginLoaded('MQ2EQBC') or pluginLoaded('MQ2DanNet'), 'BoxNet transport plugin loaded')
+        check(#groupRoles.issues() == 0, 'Group roles set', groupRoles.issues()[1])
     else
         check(mq.TLO.Me.AltAbility(331)() and true or false, 'Bazaar and Back AA 331 trained')
     end
@@ -2320,6 +2791,9 @@ local function diagnosticsText()
     local assigned, completed, _, progress = assignmentState()
     local lines = {
         'LDoN Triune Runner v' .. VERSION,
+        string.format('character=%s nativeLeader=%s', tostring(mq.TLO.Me.CleanName() or '?'),
+            tostring(mq.TLO.Group.Leader.Name() or 'none')),
+        groupRoles.summary(),
         string.format('zone=%s active=%s assigned=%s completed=%s progress="%s"',
             tostring(mq.TLO.Zone.ShortName() or '?'), tostring(active), tostring(assigned), tostring(completed), progress),
         string.format('leg=%d homeHub=%d grouped=%s mainAssist=%s', campaignLegIndex, homeHubZone,
@@ -2576,12 +3050,11 @@ local function drawUI()
         local swarmToggle = ImGui.Checkbox('Use Swarm Pull (Triune AutoCombat plugin) inside dungeons', useSwarmPull)
         if swarmToggle ~= useSwarmPull then setSwarmPull(swarmToggle) end
         if ImGui.IsItemHovered() then ImGui.SetTooltip('Pulls groups of mobs at once. Best for kill or mob-count tasks. Pull count and radius are under Options.') end
-        local names = groupNames()
-        local assistIndex = selectedAssistIndex(names)
-        ImGui.TextWrapped('Main Assist / puller')
-        ImGui.SetNextItemWidth(boundedComboWidth(names, 300))
-        local newAssist = ImGui.Combo('##mainAssist', assistIndex, names)
-        if newAssist and names[newAssist] then mainAssistName = names[newAssist] end
+        local roleView = groupRoles.snapshot()
+        ImGui.TextWrapped(roleView.summary)
+        if ImGui.Button('Group roles...') then groupRoles.open = true end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Choose the Main Tank, Main Assist and Puller, and see what each character will be told to do.') end
+        if roleView.issues[1] then ImGui.TextColored(1.0, 0.45, 0.35, 1.0, roleView.issues[1]) end
         autoStandInCombat = ImGui.Checkbox('Auto-stand from sitting / Feign Death in combat', autoStandInCombat)
         ImGui.TextWrapped('Only when you and all group members are above 50% HP.')
         campaignLoop = ImGui.Checkbox('Repeat campaign after final camp', campaignLoop)
@@ -2613,7 +3086,7 @@ local function drawUI()
         if ImGui.CollapsingHeader('How to use this window') then
             ImGui.TextWrapped('1. Form your group (if grouped) and stand anywhere. In a supported LDoN camp the runner starts right there; from any other zone it travels to your first camp using Bazaar and Back and the Magus, and only requests an adventure if you do not already have one.')
             ImGui.TextWrapped('2. Click "Run preflight check". Anything marked FAIL tells you what to fix first.')
-            ImGui.TextWrapped('3. Choose the Main Assist, then set runs and task type for each camp in the table.')
+            ImGui.TextWrapped('3. Press Group roles to choose the Main Tank, Main Assist and Puller, then set runs and task type for each camp in the table.')
             ImGui.TextWrapped('4. Press "Start campaign". Use "Stop after current dungeon" for a clean stop, or Pause at any time.')
             ImGui.TextWrapped('Your choices are saved per character. The defaults are safe: you do not need the options below to run.')
             ImGui.TextWrapped('Commands: /ldon start | pause | finish | preflight | save')
@@ -2633,9 +3106,9 @@ local function drawUI()
             ImGui.TextWrapped('Recommended: auto-retry 2, Long-Duration Buffs on if installed, everything else off until you need it.')
             ImGui.Separator()
             ImGui.TextColored(0.95, 0.78, 0.38, 1.0, 'Basic')
-            shrinkOnEntry = ImGui.Checkbox('Shrink on dungeon entry before TAC', shrinkOnEntry)
+            shrinkOnEntry = ImGui.Checkbox('Shrink once on every zone entry', shrinkOnEntry)
             if ImGui.IsItemHovered() then
-                ImGui.SetTooltip('One click per entry on each character with a ready Wand of Imperceptibility, Bracelet of the Shadow Hive, or Shimmering Bauble of Trickery, including tiered versions. Missing items or failed clicks are reported without pausing. Group boxes need ldon_shrink.lua and BoxNet slash commands enabled.')
+                ImGui.SetTooltip('While running, attempt one click per character on entry to any zone, including camps and travel zones, before movement or TAC combat setup. Supports ready regular or tiered shrink items. Failures are reported without pausing. Group boxes need ldon_shrink.lua and BoxNet slash commands enabled.')
             end
             retryLimit = ImGui.SliderInt('Auto-retry limit', retryLimit, 0, 5)
             if ImGui.IsItemHovered() then ImGui.SetTooltip('How many times a failed step is retried before the runner pauses. Recommended: 2.') end
@@ -2729,7 +3202,7 @@ local function drawUI()
             ImGui.TextWrapped(
                 'Runs: Skip or 1 through 10. Refresh task types at an Adventure Recruiter. Complete and exit each dungeon to count it.')
         end
-        ImGui.TextWrapped('Solo and group runs are supported. For groups, run on the leader and keep everyone together. Solo return needs Bazaar and Back AA 331.')
+        ImGui.TextWrapped('Solo and group runs are supported. For groups, run on one character and keep everyone together. Solo return needs Bazaar and Back AA 331.')
     end
     ImGui.End()
     ImGui.PopStyleVar(6)
@@ -2796,11 +3269,118 @@ local function drawMeshDiagnosticsUI()
             mq.cmd('/nav stop')
             mq.cmd('/moveto off')
             mq.cmd('/ac pause')
-            if (tonumber(mq.TLO.Group()) or 0) > 0 then mq.cmd('/ac net group pause') end
+            groupRoles.sendToOthers('pause')
             meshRecoveryStatus = 'Paused by user. Navigation diagnostics remain available.'
         end
     end
     ImGui.End()
+end
+
+-- Group Roles window. Runs in the ImGui callback, so it only records choices; the main loop sends them.
+function groupRoles.draw()
+    if not groupRoles.open then return end
+    ImGui.SetNextWindowSize(620, 480, ImGuiCond.FirstUseEver)
+    ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.55, 0.90, 1.00)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 6, 4)
+    local open, visible = ImGui.Begin('LDoN Group Roles', groupRoles.open)
+    groupRoles.open = open
+    if visible then
+        local names = groupNames()
+        ImGui.TextWrapped(names[1] .. ' runs the mission. This client has no native group roles, so these are sent to each box by name on every dungeon entry.')
+        if #names == 1 then ImGui.TextDisabled('Not in a group: this character fills every role.') end
+        ImGui.Separator()
+        local tableFlags = bit32.bor(ImGuiTableFlags.RowBg, ImGuiTableFlags.BordersInnerV, ImGuiTableFlags.SizingStretchProp)
+        if ImGui.BeginTable('##groupRoleChoices', 3, tableFlags) then
+            ImGui.TableSetupColumn('Role', ImGuiTableColumnFlags.WidthFixed, 90)
+            ImGui.TableSetupColumn('Character', ImGuiTableColumnFlags.WidthFixed, 190)
+            ImGui.TableSetupColumn('What it does', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableHeadersRow()
+            for index, role in ipairs({
+                { key = 'tank', label = 'Main Tank', help = 'Healers treat this character as the tank. It stops moving behind the mob.' },
+                { key = 'assist', label = 'Main Assist', help = 'Everyone else follows this character and attacks its target.' },
+                { key = 'puller', label = 'Puller', help = 'Finds and tags targets in Puller - Hunt. Swarm Pull runs here too.' },
+            }) do
+                ImGui.PushID(index)
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn()
+                ImGui.Text(role.label)
+                ImGui.TableNextColumn()
+                local value = role.key == 'assist' and mainAssistName or groupRoles[role.key]
+                local choices = {}
+                if role.key ~= 'assist' then choices[1] = '(same as Main Assist)' end
+                for _, name in ipairs(names) do choices[#choices + 1] = name end
+                local current = 1
+                if value ~= '' then
+                    current = nil
+                    for choiceIndex, choice in ipairs(choices) do
+                        if choice:lower() == value:lower() then current = choiceIndex end
+                    end
+                    -- A saved name no longer in the group stays visible rather than being silently replaced.
+                    if not current then
+                        choices[#choices + 1] = value
+                        current = #choices
+                    end
+                end
+                ImGui.SetNextItemWidth(boundedComboWidth(choices, 180))
+                local choice, changed = ImGui.Combo('##roleChoice', current, choices)
+                if changed and choices[choice] then
+                    local picked = (role.key ~= 'assist' and choice == 1) and '' or choices[choice]
+                    if role.key == 'assist' then mainAssistName = picked else groupRoles[role.key] = picked end
+                    groupRoles.view = nil
+                end
+                ImGui.TableNextColumn()
+                ImGui.TextWrapped(role.help)
+                ImGui.PopID()
+            end
+            ImGui.EndTable()
+        end
+        local view = groupRoles.snapshot()
+        ImGui.Separator()
+        ImGui.Text('What each character will be told')
+        if ImGui.BeginTable('##groupRolePlan', 5, bit32.bor(tableFlags, ImGuiTableFlags.ScrollY), 0, 170) then
+            ImGui.TableSetupScrollFreeze(0, 1)
+            ImGui.TableSetupColumn('Character', ImGuiTableColumnFlags.WidthFixed, 120)
+            ImGui.TableSetupColumn('Classes', ImGuiTableColumnFlags.WidthFixed, 90)
+            ImGui.TableSetupColumn('Role', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn('Triune mode', ImGuiTableColumnFlags.WidthFixed, 105)
+            ImGui.TableSetupColumn('Assists', ImGuiTableColumnFlags.WidthFixed, 120)
+            ImGui.TableHeadersRow()
+            for index, row in ipairs(view.plan) do
+                local roles = {}
+                if row.isTank then roles[#roles + 1] = 'Tank' end
+                if row.isAssist then roles[#roles + 1] = 'Assist' end
+                if row.isPuller then roles[#roles + 1] = 'Puller' end
+                ImGui.PushID(index)
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn()
+                ImGui.Text(row.name)
+                ImGui.TableNextColumn()
+                ImGui.Text(row.class ~= '' and row.class or '?')
+                ImGui.TableNextColumn()
+                ImGui.Text(#roles > 0 and table.concat(roles, ', ') or '-')
+                ImGui.TableNextColumn()
+                ImGui.Text(row.mode == 'puller hunt' and 'Puller - Hunt' or 'Assist - Chase')
+                ImGui.TableNextColumn()
+                ImGui.Text(row.assist:lower() == row.name:lower() and 'Self' or row.assist)
+                ImGui.PopID()
+            end
+            ImGui.EndTable()
+        end
+        ImGui.TextDisabled('Classes come from each saved Triune loadout. Any character with a Cleric, Druid, Shaman, Paladin, Ranger or Beastlord class assists the Main Tank.')
+        for _, issue in ipairs(view.issues) do
+            ImGui.TextColored(1.0, 0.45, 0.35, 1.0, issue)
+        end
+        ImGui.BeginDisabled(#view.issues > 0)
+        if ImGui.Button('Apply to group now') then groupRoles.applyPending = true end
+        ImGui.EndDisabled()
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Sends these roles straight away. Otherwise they are sent on the next dungeon entry, or within 10 seconds while in a dungeon.') end
+        ImGui.SameLine()
+        if ImGui.Button('Close') then groupRoles.open = false end
+        if groupRoles.status ~= '' then ImGui.TextWrapped(groupRoles.status) end
+    end
+    ImGui.End()
+    ImGui.PopStyleVar()
+    ImGui.PopStyleColor()
 end
 
 -- Triune callback and /ldon command handling.
@@ -2836,6 +3416,8 @@ local function command(...)
     elseif action == 'start' or action == 'resume' then
         runnerStartPending = true
     elseif action == 'pause' or action == 'stop' then
+        if groupRoles.entrySent then groupRoles.sendToOthers('/ldon remote-follow off') end
+        groupRoles.entrySent, groupRoles.entryWaited = false, false
         active = false
         runnerStartPending = false
         mq.cmd('/nav stop')
@@ -2886,13 +3468,44 @@ local function command(...)
         local targetHubZone = tonumber(args[2])
         if not targetHubZone or not HUBS[targetHubZone] then
             echo('Remote return requires a configured campaign hub zone ID.')
+        elseif remoteReturning then
+            echo('Remote return already running.')
         else
             local wasActive = active
             active = true
+            remoteReturning = true
             local returned = returnToCampaignRecruiter(targetHubZone)
+            remoteReturning = false
             active = wasActive
             echo(returned and 'Remote group return reached the campaign recruiter.'
                 or 'Remote group return did not reach the campaign recruiter.')
+        end
+    elseif action == 'remote-follow' then
+        local hub = tonumber(args[3])
+        if tostring(args[2] or ''):lower() == 'off' then
+            if groupRoles.followName then mq.cmd('/afollow off') end
+            groupRoles.followName, groupRoles.followId, groupRoles.followLostAt = nil, nil, nil
+        elseif not args[2] or not hub or not HUBS[hub] then
+            echo('Remote follow requires a leader name and a campaign hub zone ID.')
+        elseif active and not remoteReturning then
+            echo('Remote follow ignored: this character is running its own campaign.')
+        elseif not advPathLoaded() then
+            echo('MQ2AdvPath is not loaded; taking the entrance route instead of following.')
+            groupRoles.enterHub, groupRoles.enterText = hub, table.concat(args, ' ', 4)
+        else
+            if groupRoles.followName ~= args[2] then echo('Following ' .. args[2] .. ' to the dungeon.') end
+            groupRoles.followName, groupRoles.followHub = args[2], hub
+            groupRoles.followText = table.concat(args, ' ', 4)
+            groupRoles.followId, groupRoles.followLostAt, groupRoles.followCheckedAt = nil, nil, 0
+        end
+    elseif action == 'remote-enter' then
+        local hub = tonumber(args[2])
+        if not hub or not HUBS[hub] then
+            echo('Remote entry requires a configured campaign hub zone ID.')
+        elseif active and not remoteReturning then
+            echo('Remote entry ignored: this character is running its own campaign.')
+        else
+            groupRoles.enterHub, groupRoles.enterText = hub, table.concat(args, ' ', 3)
         end
     elseif action == 'exit' then
         active = false
@@ -2927,24 +3540,38 @@ local function command(...)
         else
             echo('That task option is not available. Use the in-game dropdown or /ldon help.')
         end
-    elseif action == 'ma' then
+    elseif action == 'ma' or action == 'mt' or action == 'puller' then
+        local label = action == 'ma' and 'Main Assist' or action == 'mt' and 'Main Tank' or 'Puller'
         local requested = table.concat(args, ' ', 2)
         if requested == '' then
-            echo('Main Assist / puller: ' .. mainAssistName)
-        else
+            local tank, assist, puller = groupRoles.names()
+            echo(label .. ': ' .. (action == 'ma' and assist or action == 'mt' and tank or puller))
+        elseif action == 'ma' then
             mainAssistName = requested
-            echo('Main Assist / puller set to ' .. mainAssistName .. '.')
+            echo('Main Assist set to ' .. mainAssistName .. '.')
+        else
+            local value = requested:lower() == 'same' and '' or requested
+            groupRoles[action == 'mt' and 'tank' or 'puller'] = value
+            echo(label .. (value == '' and ' now follows the Main Assist.' or ' set to ' .. value .. '.'))
+        end
+        groupRoles.view = nil
+    elseif action == 'roles' then
+        if tostring(args[2] or ''):lower() == 'apply' then
+            groupRoles.applyPending = true
+        else
+            groupRoles.open = not groupRoles.open
         end
     elseif action == 'help' then
-        echo('/ldon start | status | pause | resume | exit | finish | preflight | save | type <option> | ma <group name> | ui | diagnostics')
+        echo('/ldon roles opens Group Roles; /ldon roles apply sends them now; /ldon mt | ma | puller <name> sets a role (mt and puller also take "same").')
+        echo('/ldon start | status | pause | resume | exit | finish | preflight | save | type <number> | ma <group name> | ui | diagnostics')
         echo('/ldon swarm on | off toggles Swarm Pull; /ldon difficulty normal | hard sets the adventure risk level.')
         echo('/ldon record start | save <key> | play <key> records and plays optional MQ2AdvPath routes.')
         echo('/ldon finish stops after the current dungeon; /ldon preflight checks plugins, meshes and optional integrations.')
         echo('Settings are saved per character in the MacroQuest config folder; the log is logs/LDON_Triune.log.')
         echo('Configure up to five sequential camp legs in the window; each leg has its own dungeon count and mission type.')
         echo('Requires MQ2Nav, MQ2MoveUtils and a route mesh. Solo return uses Bazaar and Back AA 331.')
-        echo('Solo and grouped runs are supported; grouped runs require leadership and must stay together.')
-        echo('The selected Main Assist uses Puller - Hunt; other group boxes use Assist - Chase.')
+        echo('Solo and grouped runs are supported; grouped runs are controlled from one character and must stay together.')
+        echo('The Puller uses Puller - Hunt; other group boxes use Assist - Chase. Set them in Group roles.')
         echo('During combat, sit/Feign Death is ended only when you and all group members are above 50% HP.')
         echo('Mesh recovery uses recent navmesh positions, then reloads and tests the existing local mesh; it never downloads meshes.')
         echo('Use the LDoN Navigation Recovery window for live mesh/path diagnostics and a manual retry.')
@@ -2960,24 +3587,36 @@ mq.unbind('/ldonmeshfail')
 mq.bind('/ldonmeshfail', onMeshFailure)
 mq.imgui.init('LDONTriuneRunner', drawUI)
 mq.imgui.init('LDONMeshDiagnostics', drawMeshDiagnosticsUI)
+mq.imgui.init('LDONGroupRoles', groupRoles.draw)
 
 echo('LDoN Triune Runner v' .. VERSION .. ' loaded; Leg 1 defaults to one hard mob-count dungeon at the current camp. Configure the campaign, select Main Assist, then press Start.')
+
+if tostring((...) or ''):lower() == 'remote-follow' then command(...) end
 
 -- Main campaign loop: recover, fight, exit, return, change camps, and request.
 while not shuttingDown do
     mq.doevents()
+    if groupRoles.applyPending and not shuttingDown then
+        groupRoles.applyPending = false
+        groupRoles.applyNow()
+    end
     -- Window initialization can yield; never run it from an ImGui or command callback.
     if runnerStartPending and not shuttingDown then
         runnerStartPending = false
         if startRunner() then echo('Task runner started or resumed.') end
     end
-    if active then
+    if groupRoles.followName and not remoteReturning and not shuttingDown then groupRoles.followTick() end
+    if groupRoles.enterHub and not remoteReturning and not shuttingDown then groupRoles.runRemoteEntry() end
+    if active then shrinkGroupOnEntry() end
+    if active and not remoteReturning then
         local zone = zoneId()
         if zone ~= lastZone then
             lastZone = zone
-            shrinkAttemptZone = 0
+            entryPositionZone = 0
             lastNotice = ''
             if not DUNGEONS[zone] then
+                -- Left a dungeon we fought in (death, or a failed exit): the next entry needs the boxes again.
+                if combatZone ~= 0 then groupRoles.entrySent, groupRoles.entryWaited = false, false end
                 meshRecoveryRequested = false
                 swarmActive = false
                 combatZone = 0
@@ -3001,10 +3640,10 @@ while not shuttingDown do
             sampleMeshRecoveryPoint(zone)
             if not triuneReady and not ensureTriune() then
                 active = false
-            elseif meshRecoveryRequested and not completed then
+            elseif meshRecoveryRequested and not completed and not groupRoles.adventureFailed then
                 monitorCombatPosture()
                 recoverFromMeshIsolation()
-            elseif meshRecoveryAwaitingManual and not completed then
+            elseif meshRecoveryAwaitingManual and not completed and not groupRoles.adventureFailed then
                 meshRecoveryRequested = false
                 if #meshRecoveryPoints > 0 then
                     meshRecoveryStatus = string.format(
@@ -3016,7 +3655,37 @@ while not shuttingDown do
                 active = false
             else
                 monitorCombatPosture()
-                if completed then
+                if not completed and dialogue:find('not currently assigned', 1, true) then
+                    groupRoles.unassignedSince = groupRoles.unassignedSince or os.time()
+                    if os.time() - groupRoles.unassignedSince >= 30 then groupRoles.adventureFailed = true end
+                else
+                    groupRoles.unassignedSince = nil
+                end
+                if groupRoles.adventureFailed and not completed then
+                    local notice = 'The adventure was lost; waiting for combat to clear before exiting.'
+                    if lastNotice ~= notice then echo(notice); lastNotice = notice end
+                    meshRecoveryRequested = false
+                    stopSwarmPull(true)
+                    if exitTask(zone) then
+                        if adventureCompleted then
+                            recordCampaignCompletion()
+                            adventureCompleted = false
+                            groupRoles.adventureFailed = false
+                        end
+                        lastNotice = ''
+                        combatZone = 0
+                        combatRunSends = 0
+                        stuckProgress = ''
+                        stats.dungeonStartedAt = 0
+                        groupRoles.entrySent, groupRoles.entryWaited = false, false
+                        groupRoles.unassignedSince = nil
+                        travelReady = false
+                        mq.cmd('/ac pause')
+                        groupRoles.sendToOthers('pause')
+                    else
+                        handleFailure('Exit route failed after losing the adventure.', true)
+                    end
+                elseif completed then
                     meshRecoveryRequested = false
                     local notice = 'Task objective complete; waiting for combat to clear before exiting.'
                     if lastNotice ~= notice then echo(notice); lastNotice = notice end
@@ -3027,21 +3696,22 @@ while not shuttingDown do
                         combatZone = 0
                         combatRunSends = 0
                         adventureCompleted = false
+                        groupRoles.entrySent, groupRoles.entryWaited = false, false
                         travelReady = false
                         mq.cmd('/ac pause')
-                        if (tonumber(mq.TLO.Group()) or 0) > 0 then
-                            mq.cmd('/ac net group pause')
-                        end
+                        groupRoles.sendToOthers('pause')
                     else
                         handleFailure('Exit route failed.', true)
                     end
                 else
+                    if mq.gettime() - groupRoles.checkedAt >= 10000 then
+                        groupRoles.checkedAt = mq.gettime()
+                        groupRoles.apply(false)
+                    end
                     if not swarmActive and combatRunSends < 4
                         and mq.gettime() - combatRunStartedAt >= combatRunSends * 10000 then
                         mq.cmd('/ac run')
-                        if (tonumber(mq.TLO.Group()) or 0) > 0 then
-                            mq.cmd('/ac net group run')
-                        end
+                        groupRoles.sendToOthers('run')
                         combatRunSends = combatRunSends + 1
                     end
                     if progress ~= stuckProgress then
@@ -3058,14 +3728,38 @@ while not shuttingDown do
                 end
             end
         elseif ENTRY_ZONES[zone] then
-            if assigned and not completed then
+            groupRoles.unassignedSince = nil
+            local missionHub = assigned and not completed and hubFromAssignment(dialogue) or nil
+            if groupRoles.adventureFailed and not assigned then
+                groupRoles.adventureFailed = false
+            end
+            if assigned and not completed and groupRoles.adventureFailed then
+                echo('Clearing the lost adventure.')
+                if clearFinishedAssignment() then groupRoles.adventureFailed = false else mq.delay(10000) end
+            elseif missionHub and groupRoles.wrongCamp(zone, missionHub) then
+                echo('This adventure belongs to ' .. HUBS[missionHub].name .. '; going there first.')
+                homeHubZone = HUBS[zone] and missionHub or groupRoles.campOfZone(zone)
                 if not travelReady and not configureGroupTravel() then
                     active = false
-                elseif enterTask(zone, dialogue) then
+                elseif (HUBS[zone] and travelToCamp(missionHub)) or (not HUBS[zone] and returnToHub()) then
                     lastNotice = ''
                     failureStreak = 0
                 else
-                    handleFailure('Entrance route failed.', true)
+                    handleFailure('Could not reach the camp for this adventure.', true)
+                end
+            elseif assigned and not completed then
+                if missionHub then homeHubZone = missionHub end
+                if not travelReady and not configureGroupTravel() then
+                    active = false
+                else
+                    groupRoles.sendGroupEntry(dialogue)
+                    if enterTask(zone, dialogue) then
+                        groupRoles.guessWon = true
+                        lastNotice = ''
+                        failureStreak = 0
+                    else
+                        handleFailure('Entrance route failed.', true)
+                    end
                 end
             elseif homeHubZone ~= 0 and zone ~= homeHubZone then
                 if not travelReady and not configureGroupTravel() then
@@ -3143,6 +3837,7 @@ mq.unbind('/ldon')
 mq.unbind('/ldonmeshfail')
 mq.imgui.destroy('LDONTriuneRunner')
 mq.imgui.destroy('LDONMeshDiagnostics')
+mq.imgui.destroy('LDONGroupRoles')
 mq.cmd('/nav stop')
 stopSwarmPull(false)
 saveSettings()

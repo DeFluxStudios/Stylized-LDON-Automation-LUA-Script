@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to the LDoN Triune Runner are documented here. The script
-currently reports version **1.4.6**.
+currently reports version **1.4.7**.
 
 ## Version history note
 
@@ -11,14 +11,92 @@ feature ledger reconstructed from the current script and the available project
 history; they are not claims that matching releases or tags were previously
 published. The initial public package is v1.3.2.
 
+## [1.4.7] - 2026-11-07
+
+Added and fixed for players:
+
+- **Group Roles window.** Choose a Main Tank, Main Assist and Puller with
+  `/ldon roles`. Every box is told its job on each dungeon entry, including boxes in
+  another zone, and healers assist the Main Tank.
+- **Boxes come with you.** After a task is accepted, boxes follow your character to
+  the dungeon with MQ2AdvPath. A box that loses you for 20 seconds, or has no
+  MQ2AdvPath, walks the entrance route itself. Combat waits up to two minutes for
+  them, unless something attacks first.
+- **Fix the Lua error at the end of a grouped dungeon** and on a grouped start from
+  outside LDoN.
+- **Start from any character.** Starting from someone other than the group leader
+  warns and continues instead of refusing.
+- **Start from any stage.** An adventure from another camp goes to that camp first.
+  Unrecognized mission text or directions warn, then use the zone, the planned camp
+  or each known entrance in turn, instead of stopping.
+- **A lost adventure ends cleanly.** The runner exits and clears it without counting
+  it as a completed dungeon. The lesser-reward warning is not treated as a loss.
+- **Rotting tree trunk entrance in Innothule.** Navigation only goes to the first
+  point, then the character walks into the log and clicks from inside, up to three
+  times. From Guktop it walks back to Innothule first.
+- **Navigation fallbacks.** A failed approach point is retried, walked straight to
+  when within 60 units, and skipped when another point follows.
+- **Camp detection** reads entrance wording such as Upper Guk, Innothule Swamp,
+  Lesser Faydark, Southern Ro and Northern Ro.
+- The window offers the five mission types Random, Single Boss, Mob count, Collection
+  and Rescue. A saved choice outside these goes back to the camp's default.
+- Known problem: one Deepest Guk ramp (zone `guka`) is broken on the navmesh, so
+  navigation cannot cross it. Walk it by hand. A fix is planned.
+
+Route and shrink changes in this release:
+
+
+The zone approaches below were reported working in game on Triune on 2026-11-04.
+That report did not single out the Mistmoore grave route and did not cover shrink,
+so neither is confirmed yet.
+
+- Fix Rujark entry after Magus travel to South Ro: approach `Scout_Miigle`, then
+  target `RUJPORTAL701` by name, as listed in the local South Ro door data. Remove
+  the reference macro's unreachable `5, -222, 129.58` waypoint and its
+  `OBJ_ZONEBOX` target. The recording key stays `switch_sro_1`.
+- Fix North Ro quicksand entry: remove the off-mesh `5562.44, -1183.15, 25.01`
+  approach and target `TAKPORTAL700` by name, as listed in the local North Ro door
+  data. The recording key stays `switch_nro_3`.
+- Restore Lesser Faydark's routing from before the LDON.mac cross-check: directions
+  containing "grave" use switch 10 and all others use switch 7, through the existing
+  Greater and Lesser Faydark crossings. Remove the grave and crypt approach points
+  and the named crypt door, so unknown Mistmoore directions now use switch 7 instead
+  of stopping with an error.
+- Restore the Everfrost portal's nearest-door interaction from v1.4.5 after its two
+  waypoints and walking fallback: walk to a door more than 15 and up to 40 units
+  away, click only within 15 units, then wait for the zone change. Remove the
+  `MIRPORTAL700` name check. The portal route no longer falls back to a recorded
+  path.
+- Let the first Everfrost portal waypoint pass on the existing 3-unit horizontal
+  check, because the floor sits about 4 units below the navigation point.
+- Replace the snowy-mine route with three approach points:
+  `2698.93, -4693.65, -95.64`, `2751.72, -4645.75, -84.40`, then
+  `2772.53, -4727.61, -97.37` (Y, X, Z). The walking fallback still applies only to
+  the final point.
+- In Mushroom Grove (`gukd`), move the controller through
+  `140.38, -790.08, -25.96` then `151.44, -754.05, -25.96` before enabling TAC or
+  Swarm Pull, once per zone entry and once if the runner starts inside the zone. A
+  failed move leaves combat paused and pauses the runner. Other dungeons and
+  completed adventures skip this.
+- Extend the saved shrink option to every zone while the runner is active, including
+  camps, travel zones, completed adventures and the zone where the runner starts.
+  The window now calls it **Shrink once on every zone entry**. Movement and combat
+  setup wait for the attempt, so group runs with Triune running spend up to 27
+  seconds in each zone waiting on the boxes. Pausing and resuming in the same zone
+  does not click again. The saved setting and its default-off behavior are unchanged.
+- Keep TAC running when shrink is switched on in a zone where combat is already set
+  up; shrink starts from the next zone. Start Triune before a dungeon shrink, and
+  send group shrink commands only while Triune is running.
+- Validation: 141 mocked LuaJIT regressions pass; full script syntax checked.
+
 ## [1.4.6] - 2026-11-02
 
-- Set final snowy-mine waypoint height to -104 at the user's request.
+- Set final snowy-mine waypoint height to -104.
   Entry succeeded in game, though movement remains rough.
 - If the final snowy-mine navmesh approach stops within 35 units, allow a
   10-second MoveUtils walk, requiring verified 3D arrival within 10 units
   before targeting the entrance. Stop walking on pause or zoning.
-- Replace snowy-mine approach points with the user's latest screenshot:
+- Replace the snowy-mine approach points:
   `2697.18, -4694.15, -91.06`, then `2771.57, -4725.96, -104` (Y, X, Z).
   Preserve the existing arrival tolerances and entrance-door safety checks.
 - Add an opt-in, saved shrink-on-dungeon-entry option before TAC combat starts.
@@ -29,7 +107,7 @@ published. The initial public package is v1.3.2.
 - Check final crypt waypoint arrival in Y/X only, retaining navigation Z=0.
   Standing on the building floor no longer fails arrival solely due to height.
   The 3-unit horizontal arrival limit and door-click safety checks remain.
-- Update the crypt approach from the user's latest screenshots: navigate through
+- Update the crypt approach: navigate through
   `-739.37, 3793.22, 1.06` then `-760.27, 3838.85, 0` (Y, X, Z), and target
   `MISTFCFN700` by name before clicking. Leave the grave route unchanged.
   The second point uses Z=0 because the navmesh runs beneath the building.
@@ -44,7 +122,7 @@ published. The initial public package is v1.3.2.
 - Replace Mistmoore fixed switch IDs with location-based nearby entrance
   targeting. Unknown Guk/Mistmoore directions now report an
   error rather than choosing an arbitrary entrance.
-- Retain the user's Triune tree-trunk, snowy-mine and portal coordinates and
+- Retain the Triune tree-trunk, snowy-mine and portal coordinates and
   existing recorded zone-line crossings. Return-to-hub coordinates/headings
   agree with the macro. Normalize North/South Ro and Commonlands route aliases.
 - Detect zoning during entrance navigation or recorded playback before
@@ -53,7 +131,7 @@ published. The initial public package is v1.3.2.
   validation on Triune except for the confirmed crypt and snowy-mine entries.
 - Validation: 76 mocked LuaJIT regressions pass; full script syntax checked.
 
-## [1.4.5] - 2026-10-29
+## [1.4.5] - 2026-11-01
 
 - Correct a regression in the 2026-11-01 changes: Start could open the
   Adventure Request window and call `mq.delay` inside the ImGui callback.

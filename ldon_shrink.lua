@@ -10,7 +10,7 @@ local ITEMS = {
 local function shrink(expectedZone, keepRunning)
     local function report(message) print('[LDoN Shrink] ' .. message) end
     if not expectedZone then
-        report('Missing adventure zone ID; no item used.')
+        report('Missing destination zone ID; no item used.')
         return false
     end
     local function allowed()
@@ -23,7 +23,7 @@ local function shrink(expectedZone, keepRunning)
         mq.delay(250)
     end
     if tonumber(mq.TLO.Zone.ID()) ~= expectedZone or mq.TLO.MacroQuest.GameState() ~= 'INGAME' then
-        report('Adventure zone not reached in 15 seconds; skipping shrink.')
+        report('Destination zone not reached in 15 seconds; skipping shrink.')
         return false
     end
     if mq.TLO.Me.Combat() == true or mq.TLO.Me.Dead() == true then
@@ -64,7 +64,7 @@ local function shrink(expectedZone, keepRunning)
     end
     if not allowed() or tonumber(mq.TLO.Zone.ID()) ~= expectedZone
         or selfId == 0 or tonumber(mq.TLO.Target.ID()) ~= selfId then
-        report('Could not confirm self target in the adventure; no item used.')
+        report('Could not confirm self target in the destination zone; no item used.')
         return false
     end
     mq.cmdf('/useitem "%s"', name)
