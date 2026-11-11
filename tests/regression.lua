@@ -1964,13 +1964,60 @@ test('extra pullers hunt and assist the Main Tank; tank and assist cannot be ext
     assert(contains(e.commands, '/ac net BoxTwo assist chase'))
 end)
 
-test('Swarm Pull stays on the main puller when extra pullers are set', function(e)
-    withMembers(e, { 'BoxTwo' })
+local function swarmEnvironment(e)
+    e.useSwarmPull, e.swarmActive, e.swarmPullCount, e.swarmPullRadius = true, false, 3, 150
+    e.mainAssistName = 'Tester'
+    e.swarmPullInstalled = function() return true end
+    definition(e, 'startSwarmPull', 'local function stopSwarmPull')
+    definition(e, 'stopSwarmPull', 'local function setSwarmPull')
+end
+
+test('Swarm Pull starts on the main puller, not an extra puller', function(e)
+    withMembers(e, { 'BoxOne', 'BoxTwo' })
+    swarmEnvironment(e)
+    e.groupRoles.puller = 'BoxOne'
     e.groupRoles.setExtraPuller('BoxTwo', true)
-    local _, _, puller = e.groupRoles.names()
-    assert(puller == 'Tester')
-    local swarm = section('local function startSwarmPull()', 'local function stopSwarmPull')
-    assert(swarm:find('local _, _, puller = groupRoles.names()', 1, true))
+    e.startSwarmPull()
+    assert(contains(e.commands, '/ac net BoxOne swarm start 3 150'))
+    assert(not contains(e.commands, '/ac net BoxTwo swarm'))
+end)
+
+test('solo switched on mid-dungeon stops a box Swarm Pull without restarting its combat', function(e)
+    withMembers(e, { 'BoxOne' })
+    swarmEnvironment(e)
+    e.groupRoles.puller = 'BoxOne'
+    e.startSwarmPull()
+    e.groupRoles.setSolo(true)
+    e.commands = {}
+    e.stopSwarmPull(true)
+    assert(contains(e.commands, '/ac net BoxOne swarm stop'))
+    assert(not contains(e.commands, '/ac net BoxOne run'))
+    e.swarmActive, e.groupRoles.swarmOwner, e.commands = true, 'Tester', {}
+    e.stopSwarmPull(true)
+    assert(contains(e.commands, '/ac swarm stop') and contains(e.commands, '/ac run'))
+end)
+
+test('grouped Swarm Pull stop still resumes the box combat', function(e)
+    withMembers(e, { 'BoxOne' })
+    swarmEnvironment(e)
+    e.groupRoles.puller = 'BoxOne'
+    e.startSwarmPull()
+    e.stopSwarmPull(true)
+    assert(contains(e.commands, '/ac net BoxOne run'))
+end)
+
+test('solo roles never send behind on to a box that was the grouped tank', function(e)
+    withMembers(e, { 'BoxA' })
+    e.mainAssistName = 'Tester'
+    e.groupRoles.behindOff = 'BoxA'
+    e.groupRoles.solo = true
+    e.groupRoles.apply(true)
+    assert(not hasRemoteCommand(e))
+    assert(e.groupRoles.behindOff == 'BoxA')
+    e.groupRoles.solo = false
+    e.groupRoles.tank, e.commands = '', {}
+    e.groupRoles.apply(true)
+    assert(contains(e.commands, '/ac net BoxA behind on'))
 end)
 
 test('extra pullers and solo run load safely and persist with settings', function(e)
@@ -2002,7 +2049,10 @@ end)
 test('/ldon pullers and /ldon solo change the settings', function(e)
     withMembers(e, { 'BoxTwo' })
     e.command('pullers', 'add', 'BoxTwo')
-    assert(e.groupRoles.isExtraPuller('boxtwo'))
+    assert(e.groupRoles.isExtraPuller('boxtwo') and e.saved)
+    e.command('pullers', 'add', 'Tester')
+    assert(contains(e.messages, 'only becomes an extra puller if that changes'))
+    e.command('pullers', 'remove', 'Tester')
     e.command('pullers', 'remove', 'boxtwo')
     assert(#e.groupRoles.extraPullers == 0)
     e.command('pullers', 'add', 'BoxTwo')

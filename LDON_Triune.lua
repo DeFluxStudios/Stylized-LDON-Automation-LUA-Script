@@ -307,7 +307,9 @@ local function stopSwarmPull(resumeCombat)
     swarmActive = false
     local owner = groupRoles.swarmOwner ~= '' and groupRoles.swarmOwner or tostring(mq.TLO.Me.CleanName() or '')
     groupRoles.sendTo(owner, 'swarm stop')
-    if resumeCombat then groupRoles.sendTo(owner, 'run') end
+    -- After solo is switched on mid-dungeon, a box that ran Swarm Pull is not restarted.
+    local isMe = owner:lower() == tostring(mq.TLO.Me.CleanName() or ''):lower()
+    if resumeCombat and (isMe or not groupRoles.solo) then groupRoles.sendTo(owner, 'run') end
 end
 
 local function setSwarmPull(enabled)
@@ -745,6 +747,8 @@ function groupRoles.apply(force)
         end
         if row.isTank then tankRow = row end
     end
+    -- A solo run leaves the boxes alone, including a tank box told behind off in a grouped run.
+    if groupRoles.solo then return end
     -- Triune's default keeps an Assist-mode box moving behind the mob, which a tank must not do.
     local behindOff = tankRow and tankRow.mode == 'assist chase' and tankRow.name or ''
     if behindOff ~= groupRoles.behindOff then
@@ -3442,13 +3446,15 @@ function groupRoles.draw()
                 ImGui.TableNextColumn()
                 ImGui.Text(#roles > 0 and table.concat(roles, ', ') or '-')
                 ImGui.TableNextColumn()
-                local fixedRole = row.isTank or row.isAssist or row.isPuller
-                ImGui.BeginDisabled(fixedRole)
-                local extra, extraChanged = ImGui.Checkbox('##extraPuller', row.isExtraPuller == true)
-                ImGui.EndDisabled()
-                if extraChanged and not fixedRole then groupRoles.setExtraPuller(row.name, extra) end
-                if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip('Also hunt in Puller - Hunt. TAC keeps pullers off each other\'s mobs. The Main Tank, Main Assist and Puller cannot be extra pullers.')
+                if row.isTank or row.isAssist or row.isPuller then
+                    -- The rest of the group follows these roles, so they cannot be extra pullers.
+                    ImGui.TextDisabled('-')
+                else
+                    local extra, extraChanged = ImGui.Checkbox('##extraPuller', row.isExtraPuller == true)
+                    if extraChanged then groupRoles.setExtraPuller(row.name, extra) end
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Also hunt in Puller - Hunt. TAC keeps pullers off each other\'s mobs.')
+                    end
                 end
                 ImGui.TableNextColumn()
                 ImGui.Text(row.mode == 'puller hunt' and 'Puller - Hunt' or 'Assist - Chase')
@@ -3655,9 +3661,16 @@ local function command(...)
         local name = table.concat(args, ' ', 3)
         if (sub == 'add' or sub == 'remove') and name ~= '' then
             groupRoles.setExtraPuller(name, sub == 'add')
+            saveSettings()
             echo((sub == 'add' and 'Added extra puller ' or 'Removed extra puller ') .. name .. '.')
+            local tank, assist, puller = groupRoles.names()
+            local lower = name:lower()
+            if sub == 'add' and (lower == tank:lower() or lower == assist:lower() or lower == puller:lower()) then
+                echo(name .. ' is the Main Tank, Main Assist or Puller, so it only becomes an extra puller if that changes.')
+            end
         elseif sub == 'clear' then
             groupRoles.extraPullers, groupRoles.view = {}, nil
+            saveSettings()
             echo('Extra pullers cleared.')
         else
             echo('Extra pullers: ' .. (#groupRoles.extraPullers > 0 and table.concat(groupRoles.extraPullers, ', ') or 'none') ..

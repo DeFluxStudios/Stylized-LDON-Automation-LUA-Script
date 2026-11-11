@@ -28,8 +28,9 @@ Release candidate for testing, requested by a player. Not yet run in game.
   Triune AutoCombat's pull coordination keeps pullers off each other's mobs. The
   Main Tank, Main Assist and Puller cannot be extra pullers, and Swarm Pull stays on
   the Puller. The window warns that extra pullers hunt away from the healers.
-- Both settings are saved per character.
-- Validation: 150 mocked LuaJIT regressions pass; full script syntax checked. The
+- Both settings are saved per character, so Solo run stays on until you turn it off.
+  v1.4.7 saves the same file without them, so going back to v1.4.7 clears both.
+- Validation: 153 mocked LuaJIT regressions pass; full script syntax checked. The
   zone approach and route code is byte-identical to v1.4.7.
 
 ## [1.4.7] - 2026-11-07
