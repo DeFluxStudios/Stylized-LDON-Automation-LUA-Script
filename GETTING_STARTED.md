@@ -132,6 +132,8 @@ Useful commands:
 | `/ldon mt <name>` or `same` | Set the Main Tank, or make it the same as the Main Assist |
 | `/ldon ma <name>` | Set the Main Assist |
 | `/ldon puller <name>` or `same` | Set the Puller, or make it the same as the Main Assist |
+| `/ldon pullers add <name>`, `remove <name>` or `clear` | Add or remove extra pullers, who also run Puller - Hunt. With no arguments it lists them |
+| `/ldon solo on` or `off` | Run the mission with this character only while staying grouped, leaving the boxes alone |
 | `/ldon type <number>` | Set the mission type by its number in the dropdown (1 Random, 2 Single Boss, 3 Mob count, 4 Collection, 5 Rescue) for the camp leg in progress. Before a campaign starts, use the window's **Task type** column instead, because this command may change a different camp's row |
 | `/ldon difficulty normal` or `hard` | Set the adventure risk |
 | `/ldon swarm on` or `off` | Turn Swarm Pull on or off |

@@ -161,9 +161,10 @@ local CAMP_DISPLAY = {
 }
 local mainAssistName = tostring(mq.TLO.Me.CleanName() or '')
 -- Script-owned group roles. One table, because the main chunk is close to LuaJIT's limit of 200
--- local variables. An empty tank or puller name follows the Main Assist.
+-- local variables. An empty tank or puller name follows the Main Assist. extraPullers lists more
+-- characters that also run Puller - Hunt; solo runs the mission alone while staying grouped.
 local groupRoles = {
-    tank = '', puller = '', open = false, applyPending = false, status = '',
+    tank = '', puller = '', extraPullers = {}, solo = false, open = false, applyPending = false, status = '',
     applied = {}, behindOff = '', swarmOwner = '', checkedAt = 0,
     healers = { clr = true, dru = true, shm = true, pal = true, rng = true, bst = true }, classCache = {},
 }
@@ -431,6 +432,12 @@ local function saveSettings()
         string.format('    mainAssistName = %q,', mainAssistName),
         string.format('    mainTankName = %q,', groupRoles.tank),
         string.format('    pullerName = %q,', groupRoles.puller),
+        string.format('    extraPullers = { %s },', (function()
+            local quoted = {}
+            for _, name in ipairs(groupRoles.extraPullers) do quoted[#quoted + 1] = string.format('%q', name) end
+            return table.concat(quoted, ', ')
+        end)()),
+        string.format('    soloRun = %s,', tostring(groupRoles.solo)),
         string.format('    tankBehindOff = %q,', groupRoles.behindOff),
         string.format('    autoStandInCombat = %s,', tostring(autoStandInCombat)),
         string.format('    campaignLoop = %s,', tostring(campaignLoop)),
@@ -473,6 +480,18 @@ local function loadSettings()
     end
     if type(saved.mainTankName) == 'string' then groupRoles.tank = saved.mainTankName end
     if type(saved.pullerName) == 'string' then groupRoles.puller = saved.pullerName end
+    if type(saved.extraPullers) == 'table' then
+        -- Runs before the role functions below are defined, so the list is checked here.
+        groupRoles.extraPullers = {}
+        local seen = {}
+        for _, name in ipairs(saved.extraPullers) do
+            if type(name) == 'string' and name ~= '' and not seen[name:lower()] then
+                seen[name:lower()] = true
+                groupRoles.extraPullers[#groupRoles.extraPullers + 1] = name
+            end
+        end
+    end
+    if type(saved.soloRun) == 'boolean' then groupRoles.solo = saved.soloRun end
     if type(saved.tankBehindOff) == 'string' then groupRoles.behindOff = saved.tankBehindOff end
     if type(saved.autoStandInCombat) == 'boolean' then autoStandInCombat = saved.autoStandInCombat end
     if type(saved.campaignLoop) == 'boolean' then campaignLoop = saved.campaignLoop end
@@ -532,8 +551,10 @@ end
 -- each box its setup by name. Named BoxNet sends also reach boxes in another zone, which /ac net
 -- group skips. Triune has no Main Tank setting: its "Tank" spell target is that box's Main Assist,
 -- so healers assist the Main Tank when it differs from the Main Assist.
+-- A solo run lists only this character, so the boxes are never sent orders, waited for or given roles.
 local function groupNames()
     local names = { tostring(mq.TLO.Me.CleanName() or '') }
+    if groupRoles.solo then return names end
     local count = tonumber(mq.TLO.Group()) or 0
     for index = 1, count do
         local name = tostring(mq.TLO.Group.Member(index).Name() or '')
@@ -542,10 +563,47 @@ local function groupNames()
     return names
 end
 
+-- True when the boxes take part: grouped, and not set to run solo.
+function groupRoles.coordinated()
+    return not groupRoles.solo and (tonumber(mq.TLO.Group()) or 0) > 0
+end
+
+function groupRoles.isExtraPuller(name)
+    local lower = tostring(name or ''):lower()
+    for _, extra in ipairs(groupRoles.extraPullers) do
+        if extra:lower() == lower then return true end
+    end
+    return false
+end
+
+function groupRoles.setExtraPuller(name, enabled)
+    name = tostring(name or '')
+    if name == '' or groupRoles.isExtraPuller(name) == enabled then return end
+    if enabled then
+        groupRoles.extraPullers[#groupRoles.extraPullers + 1] = name
+    else
+        for index = #groupRoles.extraPullers, 1, -1 do
+            if groupRoles.extraPullers[index]:lower() == name:lower() then table.remove(groupRoles.extraPullers, index) end
+        end
+    end
+    groupRoles.view = nil
+end
+
+-- Switching solo on stops any follow already sent, while the boxes can still be reached.
+function groupRoles.setSolo(enabled)
+    if enabled == groupRoles.solo then return end
+    if enabled and groupRoles.entrySent then groupRoles.sendToOthers('/ldon remote-follow off') end
+    groupRoles.solo = enabled
+    groupRoles.entrySent, groupRoles.entryWaited = false, false
+    groupRoles.applied, groupRoles.view = {}, nil
+    echo(enabled and 'Solo run on: this character runs the mission alone and the boxes are left alone.'
+        or 'Solo run off: the group is gathered, followed and given roles again.')
+end
+
 -- Returns the Main Tank, Main Assist and Puller, matching the group's spelling of each name.
 function groupRoles.names()
     local me = tostring(mq.TLO.Me.CleanName() or '')
-    if (tonumber(mq.TLO.Group()) or 0) == 0 then return me, me, me end
+    if not groupRoles.coordinated() then return me, me, me end
     local exact = {}
     for _, name in ipairs(groupNames()) do exact[name:lower()] = name end
     local assist = mainAssistName ~= '' and mainAssistName or me
@@ -568,8 +626,18 @@ function groupRoles.issues()
 end
 
 function groupRoles.summary()
+    if groupRoles.solo and (tonumber(mq.TLO.Group()) or 0) > 0 then
+        return 'Solo run: ' .. tostring(mq.TLO.Me.CleanName() or '') ..
+            ' runs the mission alone. The group stays formed and the boxes are left alone.'
+    end
     local tank, assist, puller = groupRoles.names()
-    return string.format('Main Tank: %s   Main Assist: %s   Puller: %s', tank, assist, puller)
+    local text = string.format('Main Tank: %s   Main Assist: %s   Puller: %s', tank, assist, puller)
+    local extras = {}
+    for _, row in ipairs(groupRoles.plan()) do
+        if row.isExtraPuller then extras[#extras + 1] = row.name end
+    end
+    if #extras > 0 then text = text .. '   Extra pullers: ' .. table.concat(extras, ', ') end
+    return text
 end
 
 -- Windows read this once a second rather than querying the group every frame.
@@ -624,6 +692,9 @@ end
 
 -- What each character is told. Triune hangs assisting, chasing and Tank spell targets off each
 -- box's Main Assist, so the roles form a chain that ends at the Puller, who finds the targets.
+-- Extra pullers hunt on their own as well; TAC's pull coordination keeps pullers off each other's
+-- mobs. The Main Tank and Main Assist cannot be extra pullers, because the rest of the group
+-- follows them.
 function groupRoles.plan()
     local tank, assist, puller = groupRoles.names()
     local plan = {}
@@ -633,7 +704,9 @@ function groupRoles.plan()
             name = name, class = groupRoles.memberClass(name), mode = 'assist chase', assist = assist,
             isTank = lower == tank:lower(), isAssist = lower == assist:lower(), isPuller = lower == puller:lower(),
         }
-        if row.isPuller then
+        row.isExtraPuller = not row.isTank and not row.isAssist and not row.isPuller
+            and groupRoles.isExtraPuller(name)
+        if row.isPuller or row.isExtraPuller then
             row.mode = 'puller hunt'
             row.assist = row.isTank and assist or tank
         elseif row.isAssist then
@@ -1168,7 +1241,7 @@ end
 
 local function configureGroupTravel()
     if not validateController() then return false end
-    local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
+    local grouped = groupRoles.coordinated()
     if tostring(mq.TLO.Lua.Script('triune').Status() or '') == 'RUNNING' then
         mq.cmd('/ac pause')
         if grouped then groupRoles.sendToOthers('pause') end
@@ -1201,7 +1274,7 @@ local function shrinkGroupOnEntry()
     end
     if DUNGEONS[zone] then ensureTriune() end
     local triuneRunning = tostring(mq.TLO.Lua.Script('triune').Status() or '') == 'RUNNING'
-    local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
+    local grouped = groupRoles.coordinated()
     local dispatch = grouped and triuneRunning
     if triuneRunning then mq.cmd('/ac pause') end
     local expectedZone = tonumber(mq.TLO.Zone.ID())
@@ -1240,7 +1313,7 @@ local function configureGroupCombat()
     if zoneShortName() == 'gukd' and entryPositionZone ~= zone and not completed then
         stopSwarmPull(false)
         mq.cmd('/ac pause')
-        if (tonumber(mq.TLO.Group()) or 0) > 0 then mq.cmd('/ac net group pause') end
+        if groupRoles.coordinated() then mq.cmd('/ac net group pause') end
         echo('Mushroom Grove: moving clear of the zone-in door before enabling combat.')
         for _, point in ipairs({
             { 140.38, -790.08, -25.96 },
@@ -1264,10 +1337,9 @@ local function configureGroupCombat()
     combatZone = zoneId()
     startLongBuffs()
     startSwarmPull()
-    local tank, assist, puller = groupRoles.names()
-    echo((tonumber(mq.TLO.Group()) or 0) > 0 and
-        string.format('Group roles set: Main Tank %s, Main Assist %s, Puller %s (Hunt); other boxes Assist (Chase).',
-            tank, assist, puller) or
+    local _, assist = groupRoles.names()
+    echo(groupRoles.coordinated() and
+        ('Group roles set. ' .. groupRoles.summary() .. '. Pullers use Hunt; other boxes Assist (Chase).') or
         'Solo Triune Hunt mode set for ' .. assist .. '.')
     return true
 end
@@ -1291,7 +1363,7 @@ local function monitorCombatPosture()
     end
 
     local hold, reason = holdForHealth(tonumber(mq.TLO.Me.PctHPs()), 'your')
-    local groupSize = tonumber(mq.TLO.Group()) or 0
+    local groupSize = groupRoles.coordinated() and (tonumber(mq.TLO.Group()) or 0) or 0
     if not hold then
         for index = 1, groupSize do
             local member = mq.TLO.Group.Member(index)
@@ -1339,7 +1411,7 @@ local function recoverFromMeshIsolation()
         mq.delay(1000)
         return true
     end
-    local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
+    local grouped = groupRoles.coordinated()
     mq.cmd('/ac pause')
     if grouped then groupRoles.sendToOthers('pause') end
     if mq.TLO.Plugin('MQ2Nav').IsLoaded() ~= true
@@ -2370,7 +2442,7 @@ local function exitTask(zone)
     local route = DUNGEONS[zone]
     if not route then return false end
     if not waitUntilSafeToExit() then return false end
-    if (tonumber(mq.TLO.Group()) or 0) == 0 then
+    if not groupRoles.coordinated() then
         mq.cmd('/ac pause')
         if returnViaBazaarAndMagus() then return true end
         if not DUNGEONS[zoneId()] then return false end
@@ -2387,7 +2459,7 @@ end
 -- falls back to the leader's entrance route (enterTask, unchanged), using the leader's directions
 -- because a box's Adventure window may not show them.
 function groupRoles.sendGroupEntry(dialogue)
-    if groupRoles.entrySent or (tonumber(mq.TLO.Group()) or 0) == 0 then return end
+    if groupRoles.entrySent or not groupRoles.coordinated() then return end
     groupRoles.entrySent = true
     local directions = tostring(dialogue or ''):lower():gsub('[^%w ]', ' ')
     directions = directions:gsub('%s+', ' ')
@@ -2503,7 +2575,7 @@ local function validateTravelSetup()
         echo('Load MQ2MoveUtils before starting; recorded zone-line routes use /moveto.')
         return false
     end
-    if (tonumber(mq.TLO.Group()) or 0) == 0 and not mq.TLO.Me.AltAbility(331)() then
+    if not groupRoles.coordinated() and not mq.TLO.Me.AltAbility(331)() then
         echo('Solo release-style return travel requires Bazaar and Back AA 331.')
         return false
     end
@@ -2612,7 +2684,7 @@ local function travelToStartHub(dialogue, assigned, completed)
     end
     if not target or not HUBS[target] then return false end
     homeHubZone = target
-    if (tonumber(mq.TLO.Group()) or 0) > 0 then return returnGroupToCampaignRecruiter() end
+    if groupRoles.coordinated() then return returnGroupToCampaignRecruiter() end
     return returnToCampaignRecruiter(target)
 end
 
@@ -2725,7 +2797,7 @@ local function runPreflight()
     check(pluginLoaded('MQ2Nav'), 'MQ2Nav loaded')
     check(pluginLoaded('MQ2MoveUtils'), 'MQ2MoveUtils loaded')
     check(tostring(mq.TLO.Lua.Script('triune').Status() or '') == 'RUNNING', 'Triune running')
-    local grouped = (tonumber(mq.TLO.Group()) or 0) > 0
+    local grouped = groupRoles.coordinated()
     if grouped then
         check(pluginLoaded('MQ2EQBC') or pluginLoaded('MQ2DanNet'), 'BoxNet transport plugin loaded')
         check(#groupRoles.issues() == 0, 'Group roles set', groupRoles.issues()[1])
@@ -2796,8 +2868,8 @@ local function diagnosticsText()
         groupRoles.summary(),
         string.format('zone=%s active=%s assigned=%s completed=%s progress="%s"',
             tostring(mq.TLO.Zone.ShortName() or '?'), tostring(active), tostring(assigned), tostring(completed), progress),
-        string.format('leg=%d homeHub=%d grouped=%s mainAssist=%s', campaignLegIndex, homeHubZone,
-            tostring((tonumber(mq.TLO.Group()) or 0) > 0), mainAssistName),
+        string.format('leg=%d homeHub=%d grouped=%s solo=%s mainAssist=%s', campaignLegIndex, homeHubZone,
+            tostring((tonumber(mq.TLO.Group()) or 0) > 0), tostring(groupRoles.solo), mainAssistName),
         string.format('longBuffs=%s swarmPull=%s swarmActive=%s retryLimit=%d', tostring(useLongBuffs),
             tostring(useSwarmPull), tostring(swarmActive), retryLimit),
         string.format('shrinkOnEntry=%s shrinkAttemptZone=%d', tostring(shrinkOnEntry), shrinkAttemptZone),
@@ -3053,7 +3125,11 @@ local function drawUI()
         local roleView = groupRoles.snapshot()
         ImGui.TextWrapped(roleView.summary)
         if ImGui.Button('Group roles...') then groupRoles.open = true end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('Choose the Main Tank, Main Assist and Puller, and see what each character will be told to do.') end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Choose the Main Tank, Main Assist, Puller and any extra pullers, and see what each character will be told to do.') end
+        ImGui.SameLine()
+        local solo, soloChanged = ImGui.Checkbox('Solo run (leave boxes alone)', groupRoles.solo)
+        if soloChanged then groupRoles.setSolo(solo) end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Run the mission with this character only while staying grouped. Boxes are not gathered, followed, waited for, paused or given roles, so they are free for other things. Returns use Bazaar and Back, as in a solo run.') end
         if roleView.issues[1] then ImGui.TextColored(1.0, 0.45, 0.35, 1.0, roleView.issues[1]) end
         autoStandInCombat = ImGui.Checkbox('Auto-stand from sitting / Feign Death in combat', autoStandInCombat)
         ImGui.TextWrapped('Only when you and all group members are above 50% HP.')
@@ -3287,7 +3363,11 @@ function groupRoles.draw()
     if visible then
         local names = groupNames()
         ImGui.TextWrapped(names[1] .. ' runs the mission. This client has no native group roles, so these are sent to each box by name on every dungeon entry.')
-        if #names == 1 then ImGui.TextDisabled('Not in a group: this character fills every role.') end
+        if groupRoles.solo and (tonumber(mq.TLO.Group()) or 0) > 0 then
+            ImGui.TextColored(0.95, 0.78, 0.38, 1.0, 'Solo run is on: this character fills every role and the boxes are left alone.')
+        elseif #names == 1 then
+            ImGui.TextDisabled('Not in a group: this character fills every role.')
+        end
         ImGui.Separator()
         local tableFlags = bit32.bor(ImGuiTableFlags.RowBg, ImGuiTableFlags.BordersInnerV, ImGuiTableFlags.SizingStretchProp)
         if ImGui.BeginTable('##groupRoleChoices', 3, tableFlags) then
@@ -3337,19 +3417,22 @@ function groupRoles.draw()
         local view = groupRoles.snapshot()
         ImGui.Separator()
         ImGui.Text('What each character will be told')
-        if ImGui.BeginTable('##groupRolePlan', 5, bit32.bor(tableFlags, ImGuiTableFlags.ScrollY), 0, 170) then
+        if ImGui.BeginTable('##groupRolePlan', 6, bit32.bor(tableFlags, ImGuiTableFlags.ScrollY), 0, 170) then
             ImGui.TableSetupScrollFreeze(0, 1)
             ImGui.TableSetupColumn('Character', ImGuiTableColumnFlags.WidthFixed, 120)
             ImGui.TableSetupColumn('Classes', ImGuiTableColumnFlags.WidthFixed, 90)
             ImGui.TableSetupColumn('Role', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn('Extra puller', ImGuiTableColumnFlags.WidthFixed, 80)
             ImGui.TableSetupColumn('Triune mode', ImGuiTableColumnFlags.WidthFixed, 105)
             ImGui.TableSetupColumn('Assists', ImGuiTableColumnFlags.WidthFixed, 120)
             ImGui.TableHeadersRow()
+            local anyExtra = false
             for index, row in ipairs(view.plan) do
                 local roles = {}
                 if row.isTank then roles[#roles + 1] = 'Tank' end
                 if row.isAssist then roles[#roles + 1] = 'Assist' end
                 if row.isPuller then roles[#roles + 1] = 'Puller' end
+                if row.isExtraPuller then roles[#roles + 1] = 'Extra puller'; anyExtra = true end
                 ImGui.PushID(index)
                 ImGui.TableNextRow()
                 ImGui.TableNextColumn()
@@ -3359,12 +3442,24 @@ function groupRoles.draw()
                 ImGui.TableNextColumn()
                 ImGui.Text(#roles > 0 and table.concat(roles, ', ') or '-')
                 ImGui.TableNextColumn()
+                local fixedRole = row.isTank or row.isAssist or row.isPuller
+                ImGui.BeginDisabled(fixedRole)
+                local extra, extraChanged = ImGui.Checkbox('##extraPuller', row.isExtraPuller == true)
+                ImGui.EndDisabled()
+                if extraChanged and not fixedRole then groupRoles.setExtraPuller(row.name, extra) end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('Also hunt in Puller - Hunt. TAC keeps pullers off each other\'s mobs. The Main Tank, Main Assist and Puller cannot be extra pullers.')
+                end
+                ImGui.TableNextColumn()
                 ImGui.Text(row.mode == 'puller hunt' and 'Puller - Hunt' or 'Assist - Chase')
                 ImGui.TableNextColumn()
                 ImGui.Text(row.assist:lower() == row.name:lower() and 'Self' or row.assist)
                 ImGui.PopID()
             end
             ImGui.EndTable()
+            if anyExtra then
+                ImGui.TextColored(0.95, 0.78, 0.38, 1.0, 'Extra pullers hunt away from the healers, who stay with the Main Tank. Pick characters that can survive alone.')
+            end
         end
         ImGui.TextDisabled('Classes come from each saved Triune loadout. Any character with a Cleric, Druid, Shaman, Paladin, Ranger or Beastlord class assists the Main Tank.')
         for _, issue in ipairs(view.issues) do
@@ -3555,6 +3650,27 @@ local function command(...)
             echo(label .. (value == '' and ' now follows the Main Assist.' or ' set to ' .. value .. '.'))
         end
         groupRoles.view = nil
+    elseif action == 'pullers' then
+        local sub = tostring(args[2] or ''):lower()
+        local name = table.concat(args, ' ', 3)
+        if (sub == 'add' or sub == 'remove') and name ~= '' then
+            groupRoles.setExtraPuller(name, sub == 'add')
+            echo((sub == 'add' and 'Added extra puller ' or 'Removed extra puller ') .. name .. '.')
+        elseif sub == 'clear' then
+            groupRoles.extraPullers, groupRoles.view = {}, nil
+            echo('Extra pullers cleared.')
+        else
+            echo('Extra pullers: ' .. (#groupRoles.extraPullers > 0 and table.concat(groupRoles.extraPullers, ', ') or 'none') ..
+                '. Use /ldon pullers add | remove <name>, or /ldon pullers clear.')
+        end
+    elseif action == 'solo' then
+        local sub = tostring(args[2] or ''):lower()
+        if sub == 'on' or sub == 'off' then
+            groupRoles.setSolo(sub == 'on')
+            saveSettings()
+        else
+            echo('Solo run is ' .. (groupRoles.solo and 'on' or 'off') .. '. Use /ldon solo on | off.')
+        end
     elseif action == 'roles' then
         if tostring(args[2] or ''):lower() == 'apply' then
             groupRoles.applyPending = true
@@ -3563,6 +3679,7 @@ local function command(...)
         end
     elseif action == 'help' then
         echo('/ldon roles opens Group Roles; /ldon roles apply sends them now; /ldon mt | ma | puller <name> sets a role (mt and puller also take "same").')
+        echo('/ldon pullers add | remove <name> | clear sets extra pullers; /ldon solo on | off runs the mission alone while staying grouped.')
         echo('/ldon start | status | pause | resume | exit | finish | preflight | save | type <number> | ma <group name> | ui | diagnostics')
         echo('/ldon swarm on | off toggles Swarm Pull; /ldon difficulty normal | hard sets the adventure risk level.')
         echo('/ldon record start | save <key> | play <key> records and plays optional MQ2AdvPath routes.')

@@ -11,6 +11,27 @@ feature ledger reconstructed from the current script and the available project
 history; they are not claims that matching releases or tags were previously
 published. The initial public package is v1.3.2.
 
+## [Unreleased]
+
+Requested by a player. Not yet run in game.
+
+- **Solo run while grouped.** A **Solo run (leave boxes alone)** checkbox next to
+  **Group roles...**, or `/ldon solo on | off`, makes your character run the mission
+  alone without leaving the group. Boxes are not gathered at the recruiter, followed,
+  waited for at the dungeon, paused, shrunk or given roles. Your character runs
+  Puller - Hunt and uses the solo Bazaar and Back return, so it needs AA 331.
+  Switching it on during a grouped entry stops the boxes following first. Whether
+  boxes outside the dungeon still get adventure credit is up to the server.
+- **Extra pullers.** Tick boxes in the new **Extra puller** column of the Group Roles
+  window, or use `/ldon pullers add | remove <name>` and `/ldon pullers clear`. Each
+  extra puller runs Puller - Hunt and assists the Main Tank, as the Puller does.
+  Triune AutoCombat's pull coordination keeps pullers off each other's mobs. The
+  Main Tank, Main Assist and Puller cannot be extra pullers, and Swarm Pull stays on
+  the Puller. The window warns that extra pullers hunt away from the healers.
+- Both settings are saved per character.
+- Validation: 150 mocked LuaJIT regressions pass; full script syntax checked. The
+  zone approach and route code is byte-identical to v1.4.7.
+
 ## [1.4.7] - 2026-11-07
 
 Added and fixed for players:

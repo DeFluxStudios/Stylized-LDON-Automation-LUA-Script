@@ -15,7 +15,10 @@ Triune AutoCombat integration.
 - Supports solo runs and grouped runs. Start from whichever character you want
   to run the mission; it does not have to be the group leader.
 - Lets you choose a **Main Tank**, **Main Assist** and **Puller** in the **Group
-  roles** window, then sets up every box through Triune AutoCombat.
+  roles** window, plus any extra pullers, then sets up every box through Triune
+  AutoCombat.
+- Offers a **Solo run** option: your character runs the mission alone while you
+  stay grouped, and the boxes are left free for other things.
 - Brings your boxes along: they follow your character to the dungeon door.
 - Can be started from anywhere and at any stage of an adventure.
 - Travels among supported LDoN hubs and dungeons and manages campaign legs.

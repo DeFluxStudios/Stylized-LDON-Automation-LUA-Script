@@ -169,10 +169,15 @@ Press **Group roles...** in the runner window, or use `/ldon roles`, to choose:
 | --- | --- |
 | **Main Tank** | Healers assist this character, so heals land on it. It stops moving behind the mob. |
 | **Main Assist** | Everyone else follows this character and attacks its target. |
-| **Puller** | The only character in **Puller - Hunt**. It finds the targets, and Swarm Pull runs here too. |
+| **Puller** | The main character in **Puller - Hunt**. It finds the targets, and Swarm Pull runs here too. |
+| **Extra puller** | Tick any other box in the **Extra puller** column to put it in **Puller - Hunt** as well. Triune AutoCombat keeps pullers off each other's mobs. |
 
 - A Main Tank or Puller you leave unset is the same as the Main Assist. The window
   shows what each character will be told before anything is sent.
+- The Main Tank, Main Assist and Puller cannot be extra pullers, because the rest of
+  the group follows them. Extra pullers hunt away from the healers, who stay with the
+  Main Tank, so pick characters that can survive alone. `/ldon pullers add <name>`,
+  `remove <name>` and `clear` do the same from the command line.
 - Classes come from each character's saved Triune loadout. Anyone with a Cleric,
   Druid, Shaman, Paladin, Ranger or Beastlord class counts as a healer, so check
   that column.
@@ -184,6 +189,13 @@ Press **Group roles...** in the runner window, or use `/ldon roles`, to choose:
   prints `Following <name> to the dungeon.` Your character waits up to two minutes
   inside before starting combat, unless something attacks it. A box that loses you
   for 20 seconds, or has no MQ2AdvPath, walks the entrance route itself.
+- **Solo run (leave boxes alone)**, next to **Group roles...**, or `/ldon solo on`,
+  runs the mission with your character only while you stay grouped. The boxes are
+  not gathered, followed, waited for, paused or given roles, so you can use them for
+  other things. Your character runs **Puller - Hunt** and returns with Bazaar and
+  Back, as in a solo run, so it needs AA 331. Whether boxes outside the dungeon still
+  get adventure credit depends on the server, so check your adventure stats after
+  the first run.
 - BoxNet is needed for automatic remote-box setup.
 - Combat integration can pause/restart relevant actions as the runner
   transitions between travel and mission states.

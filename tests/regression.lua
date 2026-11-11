@@ -1864,4 +1864,155 @@ test('a guess that zoned in is kept for the same mission', function(e)
     assert(e.groupRoles.guessEntrance('x', { 'a', 'b' }) == 2)
     assert(e.groupRoles.guessEntrance('y', { 'a', 'b' }) == 1)
 end)
+-- Solo run and extra pullers.
+local function withMembers(e, members)
+    e.groupSize = #members
+    e.mq.TLO.Group.Member = function(key)
+        local name = type(key) == 'number' and members[key] or key
+        return { Name = function() return name end, Class = { ShortName = function() return 'WAR' end } }
+    end
+end
+
+local function hasRemoteCommand(e)
+    for _, command in ipairs(e.commands) do
+        if command:find('/ac net', 1, true) then return true end
+    end
+    return false
+end
+
+test('solo run while grouped lists only the controller and sends nothing to boxes', function(e)
+    withMembers(e, { 'BoxOne', 'BoxTwo' })
+    e.mainAssistName = 'BoxOne'
+    assert(e.groupRoles.coordinated() and #e.groupNames() == 3)
+    e.groupRoles.solo = true
+    assert(not e.groupRoles.coordinated())
+    local names = e.groupNames()
+    assert(#names == 1 and names[1] == 'Tester')
+    local tank, assist, puller = e.groupRoles.names()
+    assert(tank == 'Tester' and assist == 'Tester' and puller == 'Tester')
+    assert(#e.groupRoles.issues() == 0)
+    e.groupRoles.sendToOthers('pause')
+    e.groupRoles.sendGroupEntry('Enter through a quicksand pit in Northern Ro.')
+    assert(#e.commands == 0 and not e.groupRoles.entrySent)
+    assert(e.groupRoles.summary():find('Solo run', 1, true))
+end)
+
+test('solo combat setup runs Puller - Hunt on the controller and never waits for or messages boxes', function(e)
+    shrinkEnvironment(e)
+    withMembers(e, { 'BoxOne', 'BoxTwo' })
+    e.groupRoles.solo = true
+    assert(e.configureGroupCombat())
+    assert(contains(e.commands, '/ac ma Tester') and contains(e.commands, '/ac puller hunt'))
+    assert(contains(e.commands, '/ac run'))
+    assert(not hasRemoteCommand(e))
+    assert(not contains(e.messages, 'Waiting up to two minutes'))
+    assert(contains(e.messages, 'Solo Triune Hunt mode set for Tester'))
+end)
+
+test('solo run in Mushroom Grove keeps its walk but does not pause the boxes', function(e)
+    shrinkEnvironment(e)
+    withMembers(e, { 'BoxOne' })
+    e.zoneShortName = function() return 'gukd' end
+    e.groupRoles.solo = true
+    assert(e.configureGroupCombat() and #e.points == 2)
+    assert(contains(e.commands, '/ac pause') and not hasRemoteCommand(e))
+end)
+
+test('switching solo on during a grouped entry stops the boxes following first', function(e)
+    withMembers(e, { 'BoxOne' })
+    e.groupRoles.entrySent = true
+    e.groupRoles.setSolo(true)
+    assert(contains(e.commands, '/ac net BoxOne /ldon remote-follow off'))
+    assert(e.groupRoles.solo and not e.groupRoles.entrySent)
+    local sent = #e.commands
+    e.groupRoles.setSolo(false)
+    assert(#e.commands == sent and not e.groupRoles.solo)
+end)
+
+test('solo exits, start travel and preflight use the solo paths', function()
+    local exitAt = assert(source:find('local function exitTask', 1, true))
+    assert(source:sub(exitAt, exitAt + 300):find('if not groupRoles.coordinated() then', 1, true))
+    local startAt = assert(source:find('local function travelToStartHub', 1, true))
+    assert(source:sub(startAt, startAt + 600):find('if groupRoles.coordinated() then return returnGroupToCampaignRecruiter() end', 1, true))
+    local setupAt = assert(source:find('local function validateTravelSetup', 1, true))
+    assert(source:sub(setupAt, setupAt + 700):find('if not groupRoles.coordinated() and not mq.TLO.Me.AltAbility(331)() then', 1, true))
+    assert(source:find("local groupSize = groupRoles.coordinated() and (tonumber(mq.TLO.Group()) or 0) or 0", 1, true))
+end)
+
+test('extra pullers hunt and assist the Main Tank; tank and assist cannot be extra pullers', function(e)
+    withMembers(e, { 'Tanky', 'BoxTwo', 'BoxThree' })
+    e.mainAssistName, e.groupRoles.tank, e.groupRoles.puller = 'Tester', 'Tanky', ''
+    e.groupRoles.setExtraPuller('boxtwo', true)
+    e.groupRoles.setExtraPuller('Tanky', true)
+    e.groupRoles.setExtraPuller('Tester', true)
+    e.groupRoles.setExtraPuller('NotHere', true)
+    local rows = {}
+    for _, row in ipairs(e.groupRoles.plan()) do rows[row.name] = row end
+    assert(rows.BoxTwo.isExtraPuller and rows.BoxTwo.mode == 'puller hunt' and rows.BoxTwo.assist == 'Tanky')
+    assert(not rows.Tanky.isExtraPuller and rows.Tanky.mode == 'assist chase')
+    assert(not rows.Tester.isExtraPuller and rows.Tester.mode == 'puller hunt')
+    assert(not rows.BoxThree.isExtraPuller and rows.BoxThree.mode == 'assist chase')
+    assert(#e.groupRoles.issues() == 0)
+    assert(e.groupRoles.summary():find('Extra pullers: BoxTwo', 1, true))
+    e.groupRoles.apply(true)
+    assert(contains(e.commands, '/ac net BoxTwo puller hunt'))
+    assert(contains(e.commands, '/ac net BoxThree assist chase'))
+    e.groupRoles.setExtraPuller('BOXTWO', false)
+    assert(#e.groupRoles.extraPullers == 3)
+    e.commands = {}
+    e.groupRoles.apply(false)
+    assert(contains(e.commands, '/ac net BoxTwo assist chase'))
+end)
+
+test('Swarm Pull stays on the main puller when extra pullers are set', function(e)
+    withMembers(e, { 'BoxTwo' })
+    e.groupRoles.setExtraPuller('BoxTwo', true)
+    local _, _, puller = e.groupRoles.names()
+    assert(puller == 'Tester')
+    local swarm = section('local function startSwarmPull()', 'local function stopSwarmPull')
+    assert(swarm:find('local _, _, puller = groupRoles.names()', 1, true))
+end)
+
+test('extra pullers and solo run load safely and persist with settings', function(e)
+    shrinkEnvironment(e)
+    definition(e, 'loadSettings', '\nloadSettings()')
+    e.loadfile = function() return function()
+        return { extraPullers = { 'BoxTwo', 'boxtwo', 5, '', 'BoxThree' }, soloRun = true }
+    end end
+    e.loadSettings()
+    assert(#e.groupRoles.extraPullers == 2 and e.groupRoles.extraPullers[2] == 'BoxThree')
+    assert(e.groupRoles.solo == true)
+    e.loadfile = function() return function() return { extraPullers = 'BoxTwo', soloRun = 'yes' } end end
+    e.loadSettings()
+    assert(#e.groupRoles.extraPullers == 2 and e.groupRoles.solo == true)
+    e.swarmPullCount, e.swarmPullRadius, e.retryLimit = 3, 150, 2
+    e.settingsPath = 'mock-settings'
+    local written
+    e.io = { open = function()
+        return { write = function(_, text) written = text end, close = function() end }
+    end }
+    definition(e, 'saveSettings', 'local function loadSettings')
+    assert(e.saveSettings())
+    assert(written:find('extraPullers = { "BoxTwo", "BoxThree" }', 1, true))
+    assert(written:find('soloRun = true', 1, true))
+    local reread = assert(loadstring(written))()
+    assert(reread.extraPullers[1] == 'BoxTwo' and reread.soloRun == true)
+end)
+
+test('/ldon pullers and /ldon solo change the settings', function(e)
+    withMembers(e, { 'BoxTwo' })
+    e.command('pullers', 'add', 'BoxTwo')
+    assert(e.groupRoles.isExtraPuller('boxtwo'))
+    e.command('pullers', 'remove', 'boxtwo')
+    assert(#e.groupRoles.extraPullers == 0)
+    e.command('pullers', 'add', 'BoxTwo')
+    e.command('pullers', 'clear')
+    assert(#e.groupRoles.extraPullers == 0)
+    e.command('solo', 'on')
+    assert(e.groupRoles.solo and e.saved)
+    e.command('solo')
+    assert(contains(e.messages, 'Solo run is on'))
+    e.command('solo', 'off')
+    assert(not e.groupRoles.solo)
+end)
 print(string.format('%d regression tests passed; full script syntax checked.', count))
