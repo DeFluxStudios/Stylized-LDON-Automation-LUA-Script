@@ -21,7 +21,7 @@
 local mq = require('mq')
 local ImGui = require('ImGui')
 
-local VERSION = '1.4.7'
+local VERSION = '1.5.0-rc.1'
 
 -- Hub, zone-line, and dungeon metadata used by the travel state machine.
 local HUBS = {

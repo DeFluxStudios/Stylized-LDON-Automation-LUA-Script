@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to the LDoN Triune Runner are documented here. The script
-currently reports version **1.4.7**.
+currently reports version **1.5.0-rc.1**.
 
 ## Version history note
 
@@ -11,9 +11,9 @@ feature ledger reconstructed from the current script and the available project
 history; they are not claims that matching releases or tags were previously
 published. The initial public package is v1.3.2.
 
-## [Unreleased]
+## [1.5.0-rc.1] - 2026-11-11
 
-Requested by a player. Not yet run in game.
+Release candidate for testing, requested by a player. Not yet run in game.
 
 - **Solo run while grouped.** A **Solo run (leave boxes alone)** checkbox next to
   **Group roles...**, or `/ldon solo on | off`, makes your character run the mission

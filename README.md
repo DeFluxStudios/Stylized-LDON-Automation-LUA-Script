@@ -5,7 +5,7 @@ Triune AutoCombat integration.
 
 ![LDoN Triune Runner artwork](artwork/ldon-triune-banner.svg)
 
-**Current release: v1.4.7**
+**Current release: v1.4.7.** This is release candidate v1.5.0-rc.1, a pre-release for testing.
 
 ## What it does
 

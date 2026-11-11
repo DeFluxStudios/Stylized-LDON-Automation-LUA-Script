@@ -40,21 +40,21 @@ instructions for those projects separately.
 
 ## Windows installation
 
-1. Download `LDON-Triune-v1.4.7-windows.zip` from the GitHub release.
+1. Download `LDON-Triune-v1.5.0-rc.1-windows.zip` from the GitHub release.
    The release notes list its SHA-256 checksum in plain text.
 2. Before extracting, compare the published checksum with the checksum of your
    downloaded file. The release includes `SHA256SUMS.txt`; on Windows, you can
    calculate the local checksum in PowerShell with:
 
    ```powershell
-   Get-FileHash .\LDON-Triune-v1.4.7-windows.zip -Algorithm SHA256
+   Get-FileHash .\LDON-Triune-v1.5.0-rc.1-windows.zip -Algorithm SHA256
    ```
 
    `Get-FileHash` prints capital letters and the release notes use lower case,
    which makes no difference. Every character must otherwise match. If one does
    not, download the file again.
 3. Right-click the ZIP and choose **Extract All...**.
-4. Open the extracted `LDON-Triune-v1.4.7` folder.
+4. Open the extracted `LDON-Triune-v1.5.0-rc.1` folder.
 5. Copy `LDON_Triune.lua` into the `lua` folder inside your MacroQuest
    installation. For example:
 
@@ -86,7 +86,7 @@ materials. They do not need to be copied into MacroQuest's `lua` folder.
 
 ## Linux archive
 
-The file `LDON-Triune-v1.4.7-linux.tar.gz` can be extracted with a desktop
+The file `LDON-Triune-v1.5.0-rc.1-linux.tar.gz` can be extracted with a desktop
 archive utility or the command below. Its SHA-256 checksum is listed in the
 release notes and `SHA256SUMS.txt`.
 
@@ -95,7 +95,7 @@ Compare it with the checksum of your downloaded archive before extracting. Put
 
 ```sh
 tr -d '\r' < SHA256SUMS.txt | sha256sum -c --ignore-missing
-tar -xzf LDON-Triune-v1.4.7-linux.tar.gz
+tar -xzf LDON-Triune-v1.5.0-rc.1-linux.tar.gz
 ```
 
 The extracted folder has the same contents as the Windows ZIP. Copy
